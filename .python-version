@@ -1,0 +1,20 @@
+3.11.9
+```
+
+## **Warum dieser Fehler?**
+- Python 3.13 hat `audioop` entfernt
+- discord.py 2.3.2 benötigt noch `audioop`
+- Lösung: Python 3.11 verwenden ODER discord.py auf 2.4+ aktualisieren
+
+## **Render neu deployen:**
+
+1. **Füge diese Dateien zu deinem GitHub Repository hinzu:**
+   - `runtime.txt` (mit Inhalt `python-3.11.9`)
+   - Aktualisiere `requirements.txt` zu `discord.py>=2.4.0`
+
+2. **In Render Dashboard:**
+   - Gehe zu deinem Service
+   - **Settings** → **Environment**
+   - Füge hinzu:
+```
+     PYTHON_VERSION=3.11.9
