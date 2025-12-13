@@ -148,12 +148,16 @@ async def set_log_channel(interaction: discord.Interaction, channel: discord.Tex
 
     # Log
     log_embed = discord.Embed(
-        title="⚙️ Konfiguration geändert",
-        description=f"Log-Channel wurde auf {channel.mention} gesetzt.",
+        title="⚙️ System-Konfiguration",
+        description="Der Log-Channel wurde erfolgreich konfiguriert.",
         color=COLOR_INFO,
         timestamp=datetime.now()
     )
-    log_embed.add_field(name="Geändert von", value=interaction.user.mention)
+    log_embed.add_field(name="Aktion", value="Log-Channel festgelegt", inline=False)
+    log_embed.add_field(name="Neuer Log-Channel", value=channel.mention, inline=True)
+    log_embed.add_field(name="Konfiguriert von", value=interaction.user.mention, inline=True)
+    log_embed.add_field(name="Zeitstempel", value=datetime.now().strftime('%d.%m.%Y, %H:%M:%S Uhr'), inline=True)
+    log_embed.set_footer(text=f"User-ID: {interaction.user.id}")
     await send_to_log_channel(interaction.guild, log_embed)
 
     logger.info(f"Log-Channel auf {channel.id} gesetzt von User {interaction.user.id}")
@@ -183,12 +187,16 @@ async def set_company_account(interaction: discord.Interaction, user: discord.Us
 
     # Log
     log_embed = discord.Embed(
-        title="⚙️ Konfiguration geändert",
-        description=f"Firmenkonto wurde auf {user.mention} gesetzt.",
+        title="⚙️ System-Konfiguration",
+        description="Das Firmenkonto wurde erfolgreich konfiguriert.",
         color=COLOR_INFO,
         timestamp=datetime.now()
     )
-    log_embed.add_field(name="Geändert von", value=interaction.user.mention)
+    log_embed.add_field(name="Aktion", value="Firmenkonto festgelegt", inline=False)
+    log_embed.add_field(name="Neues Firmenkonto", value=f"{user.mention}\n`{user.id}`", inline=True)
+    log_embed.add_field(name="Konfiguriert von", value=interaction.user.mention, inline=True)
+    log_embed.add_field(name="Zeitstempel", value=datetime.now().strftime('%d.%m.%Y, %H:%M:%S Uhr'), inline=True)
+    log_embed.set_footer(text=f"User-ID: {interaction.user.id}")
     await send_to_log_channel(interaction.guild, log_embed)
 
 # Auswahlmenü für Versicherungen
@@ -695,12 +703,25 @@ async def send_reminder(invoice_id, invoice_data, reminder_number, surcharge_per
             # Log
             log_embed = discord.Embed(
                 title=f"📨 {reminder_number}. Mahnung versendet",
-                color=COLOR_WARNING,
+                description="Eine Zahlungserinnerung wurde automatisch an den Kunden versendet.",
+                color=COLOR_WARNING if reminder_number < 3 else COLOR_ERROR,
                 timestamp=datetime.now()
             )
+            log_embed.add_field(name="━━━━━━━━━━━━━━━━━━━━━━━", value="**Mahnungsdetails**", inline=False)
             log_embed.add_field(name="Rechnungsnummer", value=f"`{invoice_id}`", inline=True)
             log_embed.add_field(name="Kunde", value=customer['rp_name'], inline=True)
-            log_embed.add_field(name="Neuer Betrag", value=f"{invoice_data['betrag']:,.2f} €", inline=True)
+            log_embed.add_field(name="Mahnungsstufe", value=f"{reminder_number}. Mahnung", inline=True)
+            log_embed.add_field(name="━━━━━━━━━━━━━━━━━━━━━━━", value="**Finanzielle Informationen**", inline=False)
+            log_embed.add_field(name="Ursprünglicher Betrag", value=f"{invoice_data['original_betrag']:,.2f} €", inline=True)
+            log_embed.add_field(name="Neuer Betrag", value=f"**{invoice_data['betrag']:,.2f} €**", inline=True)
+            if surcharge_percent > 0:
+                log_embed.add_field(name="Mahngebühr", value=f"+{surcharge_percent}%", inline=True)
+            else:
+                log_embed.add_field(name="Mahngebühr", value="Keine", inline=True)
+            log_embed.add_field(name="━━━━━━━━━━━━━━━━━━━━━━━", value="**Zusatzinformationen**", inline=False)
+            log_embed.add_field(name="Kunden-ID", value=f"`{invoice_data['customer_id']}`", inline=True)
+            log_embed.add_field(name="Zeitstempel", value=datetime.now().strftime('%d.%m.%Y, %H:%M:%S Uhr'), inline=True)
+            log_embed.set_footer(text="Automatisch generiert • System-ID: 0")
             await send_to_log_channel(guild, log_embed)
 
             add_log_entry(
@@ -883,13 +904,20 @@ class TicketCloseView(discord.ui.View):
 
         # Log
         log_embed = discord.Embed(
-            title="🔒 Ticket geschlossen",
+            title="🔒 Support-Ticket geschlossen",
+            description="Ein Mitarbeiter hat ein Kundenkontakt-Ticket geschlossen.",
             color=COLOR_WARNING,
             timestamp=datetime.now()
         )
+        log_embed.add_field(name="━━━━━━━━━━━━━━━━━━━━━━━", value="**Ticket-Informationen**", inline=False)
         log_embed.add_field(name="Ticket-Channel", value=channel.mention, inline=True)
-        log_embed.add_field(name="Kunde", value=f"`{self.customer_id}`", inline=True)
         log_embed.add_field(name="Geschlossen von", value=interaction.user.mention, inline=True)
+        log_embed.add_field(name="Status", value="🔴 Geschlossen", inline=True)
+        log_embed.add_field(name="━━━━━━━━━━━━━━━━━━━━━━━", value="**Zusatzinformationen**", inline=False)
+        log_embed.add_field(name="Kunden-ID", value=f"`{self.customer_id}`", inline=True)
+        log_embed.add_field(name="Channel-ID", value=f"`{self.channel_id}`", inline=True)
+        log_embed.add_field(name="Zeitstempel", value=datetime.now().strftime('%d.%m.%Y, %H:%M:%S Uhr'), inline=True)
+        log_embed.set_footer(text=f"User-ID: {interaction.user.id}")
         await send_to_log_channel(interaction.guild, log_embed)
 
         add_log_entry(
@@ -936,11 +964,18 @@ async def setup_tickets(interaction: discord.Interaction, channel: discord.TextC
 
         log_embed = discord.Embed(
             title="⚙️ Ticket-System eingerichtet",
+            description="Das Kundenkontakt-System wurde erfolgreich konfiguriert.",
             color=COLOR_INFO,
             timestamp=datetime.now()
         )
-        log_embed.add_field(name="Channel", value=channel.mention, inline=True)
+        log_embed.add_field(name="━━━━━━━━━━━━━━━━━━━━━━━", value="**Setup-Informationen**", inline=False)
+        log_embed.add_field(name="Ticket-Panel Channel", value=channel.mention, inline=True)
         log_embed.add_field(name="Eingerichtet von", value=interaction.user.mention, inline=True)
+        log_embed.add_field(name="Status", value="✅ Aktiv", inline=True)
+        log_embed.add_field(name="━━━━━━━━━━━━━━━━━━━━━━━", value="**Zusatzinformationen**", inline=False)
+        log_embed.add_field(name="Channel-ID", value=f"`{channel.id}`", inline=True)
+        log_embed.add_field(name="Zeitstempel", value=datetime.now().strftime('%d.%m.%Y, %H:%M:%S Uhr'), inline=True)
+        log_embed.set_footer(text=f"User-ID: {interaction.user.id}")
         await send_to_log_channel(interaction.guild, log_embed)
 
     except Exception as e:
