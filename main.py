@@ -96,12 +96,12 @@ data = load_data()
 
 # Versicherungstypen mit Preisen und zugehörigen Rollen
 INSURANCE_TYPES = {
-    "Krankenversicherung (Gesetzlich)": {"price": 350.00, "role": "Krankenversicherung"},
-    "Krankenversicherung (Privat)": {"price": 750.00, "role": "Krankenversicherung"},
-    "Haftpflichtversicherung": {"price": 120.00, "role": "Haftpflichtversicherung"},
-    "Hausratversicherung": {"price": 180.00, "role": "Hausratversicherung"},
-    "Kfz-Versicherung": {"price": 500.00, "role": "Kfz-Versicherung"},
-    "Rechtsschutzversicherung": {"price": 280.00, "role": "Rechtsschutzversicherung"},
+    "Krankenversicherung (Gesetzlich)": {"price": 3000.00, "role": "Krankenversicherung"},
+    "Krankenversicherung (Privat)": {"price": 5000.00, "role": "Krankenversicherung"},
+    "Haftpflichtversicherung": {"price": 3000.00, "role": "Haftpflichtversicherung"},
+    "Hausratversicherung": {"price": 10000.00, "role": "Hausratversicherung"},
+    "Kfz-Versicherung": {"price": 3000.00, "role": "Kfz-Versicherung"},
+    "Rechtsschutzversicherung": {"price": 3000.00, "role": "Rechtsschutzversicherung"},
     "Unfallversicherung": {"price": 220.00, "role": "Unfallversicherung"},
     "Berufsunfähigkeitsversicherung": {"price": 450.00, "role": "Berufsunfähigkeitsversicherung"}
 }
@@ -525,7 +525,11 @@ async def create_invoice(
 
         customer = data['customers'][customer_id]
         invoice_id = generate_invoice_id()
-        betrag = customer['total_monthly_price']
+        betrag_netto = customer['total_monthly_price']
+
+        # 13% Steuer
+        steuer = betrag_netto * 0.13
+        betrag_brutto = betrag_netto + steuer
 
         # Zahlungsfrist: 3 Tage
         due_date = datetime.now() + timedelta(days=3)
@@ -556,9 +560,9 @@ async def create_invoice(
         embed.add_field(name="Versicherte Positionen", value=insurance_details, inline=False)
 
         embed.add_field(name="‎", value="─────────────────────────────", inline=False)
-        embed.add_field(name="Zwischensumme", value=f"{betrag:,.2f} €", inline=True)
-        embed.add_field(name="MwSt. (0%)", value="0,00 €", inline=True)
-        embed.add_field(name="**Rechnungsbetrag**", value=f"**{betrag:,.2f} €**", inline=True)
+        embed.add_field(name="Zwischensumme (Netto)", value=f"{betrag_netto:,.2f} €", inline=True)
+        embed.add_field(name="Steuer (13%)", value=f"{steuer:,.2f} €", inline=True)
+        embed.add_field(name="**Rechnungsbetrag (Brutto)**", value=f"**{betrag_brutto:,.2f} €**", inline=True)
 
         embed.add_field(name="‎", value="─────────────────────────────", inline=False)
         embed.add_field(name="Status", value="⏳ Zahlung ausstehend", inline=False)
@@ -569,8 +573,10 @@ async def create_invoice(
 
         data['invoices'][invoice_id] = {
             "customer_id": customer_id,
-            "betrag": betrag,
-            "original_betrag": betrag,
+            "betrag": betrag_brutto,
+            "betrag_netto": betrag_netto,
+            "steuer": steuer,
+            "original_betrag": betrag_brutto,
             "paid": False,
             "message_id": message.id,
             "channel_id": channel.id,
@@ -610,7 +616,7 @@ async def create_invoice(
             color=COLOR_SUCCESS
         )
         success_embed.add_field(name="Rechnungsnummer", value=f"`{invoice_id}`", inline=True)
-        success_embed.add_field(name="Betrag", value=f"{betrag:,.2f} €", inline=True)
+        success_embed.add_field(name="Betrag (Brutto)", value=f"{betrag_brutto:,.2f} €", inline=True)
         success_embed.add_field(name="Fällig am", value=due_date.strftime('%d.%m.%Y'), inline=True)
 
         await interaction.followup.send(embed=success_embed, ephemeral=True)
@@ -619,6 +625,146 @@ async def create_invoice(
         logger.error(f"Fehler beim Erstellen der Rechnung: {e}", exc_info=True)
         error_embed = discord.Embed(
             title="Fehler bei der Rechnungsstellung",
+            description=f"Es ist ein Fehler aufgetreten: {str(e)}",
+            color=COLOR_ERROR
+        )
+        await interaction.followup.send(embed=error_embed, ephemeral=True)
+
+# Rechnung archivieren
+@bot.tree.command(name="rechnung_archivieren", description="Markiert eine Rechnung als bezahlt und archiviert sie")
+@app_commands.describe(invoice_id="Rechnungsnummer (z.B. RE-2412-A3F9)")
+async def archive_invoice(interaction: discord.Interaction, invoice_id: str):
+    await interaction.response.defer(ephemeral=True)
+    logger.info(f"Rechnung wird archiviert von User {interaction.user.id}: {invoice_id}")
+
+    try:
+        # Prüfen ob Rechnung existiert
+        if invoice_id not in data['invoices']:
+            error_embed = discord.Embed(
+                title="Rechnung nicht gefunden",
+                description=f"Es existiert keine Rechnung mit der Nummer `{invoice_id}`.",
+                color=COLOR_ERROR
+            )
+            await interaction.followup.send(embed=error_embed, ephemeral=True)
+            return
+
+        invoice = data['invoices'][invoice_id]
+
+        # Prüfen ob bereits bezahlt
+        if invoice.get('paid', False):
+            info_embed = discord.Embed(
+                title="Rechnung bereits archiviert",
+                description=f"Die Rechnung `{invoice_id}` wurde bereits als bezahlt markiert.",
+                color=COLOR_INFO
+            )
+            await interaction.followup.send(embed=info_embed, ephemeral=True)
+            return
+
+        customer_id = invoice['customer_id']
+        customer = data['customers'].get(customer_id)
+
+        if not customer:
+            error_embed = discord.Embed(
+                title="Kunde nicht gefunden",
+                description=f"Kunde `{customer_id}` konnte nicht gefunden werden.",
+                color=COLOR_ERROR
+            )
+            await interaction.followup.send(embed=error_embed, ephemeral=True)
+            return
+
+        # Rechnung als bezahlt markieren
+        data['invoices'][invoice_id]['paid'] = True
+        data['invoices'][invoice_id]['paid_by'] = interaction.user.id
+        data['invoices'][invoice_id]['paid_at'] = datetime.now().isoformat()
+        data['invoices'][invoice_id]['archived'] = True
+        data['invoices'][invoice_id]['reminder_count'] = 0
+        save_data(data)
+
+        # Log-Eintrag
+        add_log_entry(
+            "RECHNUNG_ARCHIVIERT",
+            interaction.user.id,
+            {
+                "invoice_id": invoice_id,
+                "customer_id": customer_id,
+                "betrag": invoice['betrag']
+            }
+        )
+
+        # Log in Channel senden
+        log_embed = discord.Embed(
+            title="📦 Rechnung archiviert",
+            description="Eine Rechnung wurde erfolgreich als bezahlt markiert und archiviert.",
+            color=COLOR_SUCCESS,
+            timestamp=datetime.now()
+        )
+        log_embed.add_field(name="━━━━━━━━━━━━━━━━━━━━━━━", value="**Rechnungsdetails**", inline=False)
+        log_embed.add_field(name="Rechnungsnummer", value=f"`{invoice_id}`", inline=True)
+        log_embed.add_field(name="Kunde", value=customer['rp_name'], inline=True)
+        log_embed.add_field(name="Archiviert von", value=interaction.user.mention, inline=True)
+        log_embed.add_field(name="━━━━━━━━━━━━━━━━━━━━━━━", value="**Zahlungsinformationen**", inline=False)
+        log_embed.add_field(name="Betrag (Netto)", value=f"{invoice.get('betrag_netto', 0):,.2f} €", inline=True)
+        log_embed.add_field(name="Steuer (13%)", value=f"{invoice.get('steuer', 0):,.2f} €", inline=True)
+        log_embed.add_field(name="Betrag (Brutto)", value=f"**{invoice['betrag']:,.2f} €**", inline=True)
+        log_embed.add_field(name="━━━━━━━━━━━━━━━━━━━━━━━", value="**Zusatzinformationen**", inline=False)
+        log_embed.add_field(name="Kunden-ID", value=f"`{customer_id}`", inline=True)
+        log_embed.add_field(name="Status", value="✅ Bezahlt & Archiviert", inline=True)
+        log_embed.add_field(name="Zeitstempel", value=datetime.now().strftime('%d.%m.%Y, %H:%M:%S Uhr'), inline=True)
+        log_embed.set_footer(text=f"User-ID: {interaction.user.id}")
+        await send_to_log_channel(interaction.guild, log_embed)
+
+        # Rechnung in Kundenakte posten
+        thread_id = customer.get('thread_id')
+        if thread_id:
+            try:
+                thread = interaction.guild.get_thread(thread_id)
+                if thread:
+                    archive_embed = discord.Embed(
+                        title="📦 Archivierte Rechnung",
+                        description="Diese Rechnung wurde als bezahlt markiert und archiviert.",
+                        color=COLOR_SUCCESS,
+                        timestamp=datetime.now()
+                    )
+                    archive_embed.add_field(name="Rechnungsnummer", value=f"`{invoice_id}`", inline=True)
+                    archive_embed.add_field(name="Rechnungsdatum", value=datetime.fromisoformat(invoice['created_at']).strftime('%d.%m.%Y'), inline=True)
+                    archive_embed.add_field(name="Zahlungsdatum", value=datetime.now().strftime('%d.%m.%Y'), inline=True)
+
+                    insurance_list = customer.get('versicherungen', [])
+                    insurance_text = "\n".join(f"▸ {ins}" for ins in insurance_list)
+                    archive_embed.add_field(name="Versicherte Positionen", value=insurance_text if insurance_text else "Keine", inline=False)
+
+                    archive_embed.add_field(name="‎", value="─────────────────────────────", inline=False)
+                    archive_embed.add_field(name="Nettobetrag", value=f"{invoice.get('betrag_netto', 0):,.2f} €", inline=True)
+                    archive_embed.add_field(name="Steuer (13%)", value=f"{invoice.get('steuer', 0):,.2f} €", inline=True)
+                    archive_embed.add_field(name="**Bruttobetrag**", value=f"**{invoice['betrag']:,.2f} €**", inline=True)
+
+                    archive_embed.add_field(name="‎", value="─────────────────────────────", inline=False)
+                    archive_embed.add_field(name="Status", value="✅ Bezahlt", inline=True)
+                    archive_embed.add_field(name="Archiviert von", value=interaction.user.mention, inline=True)
+                    archive_embed.set_footer(text=f"Archiviert am {datetime.now().strftime('%d.%m.%Y, %H:%M:%S')} Uhr")
+
+                    await thread.send(embed=archive_embed)
+                    logger.info(f"Rechnung {invoice_id} in Kundenakte gepostet")
+            except Exception as e:
+                logger.error(f"Fehler beim Posten in Kundenakte: {e}")
+
+        # Erfolgsbestätigung
+        success_embed = discord.Embed(
+            title="✅ Rechnung erfolgreich archiviert",
+            description=f"Die Rechnung `{invoice_id}` wurde als bezahlt markiert und archiviert.",
+            color=COLOR_SUCCESS
+        )
+        success_embed.add_field(name="Kunde", value=customer['rp_name'], inline=True)
+        success_embed.add_field(name="Betrag", value=f"{invoice['betrag']:,.2f} €", inline=True)
+        success_embed.add_field(name="Status", value="✅ Archiviert", inline=True)
+
+        await interaction.followup.send(embed=success_embed, ephemeral=True)
+        logger.info(f"Rechnung {invoice_id} erfolgreich archiviert von User {interaction.user.id}")
+
+    except Exception as e:
+        logger.error(f"Fehler beim Archivieren der Rechnung: {e}", exc_info=True)
+        error_embed = discord.Embed(
+            title="Fehler beim Archivieren",
             description=f"Es ist ein Fehler aufgetreten: {str(e)}",
             color=COLOR_ERROR
         )
@@ -1033,6 +1179,7 @@ async def show_logs(interaction: discord.Interaction, anzahl: int = 10):
                 "KUNDENAKTE_ERSTELLT": "Kundenakte erstellt",
                 "RECHNUNG_ERSTELLT": "Rechnung ausgestellt",
                 "RECHNUNG_BEZAHLT": "Rechnung bezahlt",
+                "RECHNUNG_ARCHIVIERT": "Rechnung archiviert",
                 "MAHNUNG_1": "1. Mahnung versendet",
                 "MAHNUNG_2": "2. Mahnung versendet (+5%)",
                 "MAHNUNG_3": "3. Mahnung versendet (+10%)",
