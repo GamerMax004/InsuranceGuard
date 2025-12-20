@@ -103,7 +103,7 @@ INSURANCE_TYPES = {
     "Kfz-Versicherung": {"price": 3000.00, "role": "Kfz-Versicherung"},
     "Rechtsschutzversicherung": {"price": 3000.00, "role": "Rechtsschutzversicherung"},
     "Unfallversicherung": {"price": 220.00, "role": "Unfallversicherung"},
-    "Berufsunfähigkeitsversicherung": {"price": 450.00, "role": "Berufsunfähigkeitsversicherung"}
+    "Berufsunfähigkeitsversicherung": {"price": 6000.00, "role": "Berufsunfähigkeitsversicherung"}
 }
 
 # Farbschema
