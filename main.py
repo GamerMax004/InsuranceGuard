@@ -1,1472 +1,1259 @@
 import discord
-from discord.ext import commands
-from discord import app_commands, ui
-import asyncio
-import os
+from discord import app_commands
+from discord.ext import commands, tasks
 import json
-from datetime import datetime
-from typing import Optional, Dict, List
+import os
+from datetime import datetime, timedelta
+import logging
+import random
+import string
 
-# --- Konfigurationsdatei ---
-CONFIG_FILE = "ticket_config.json"
-AI_TRAINING_FILE = "ai_training.json"
-PERMISSIONS_FILE = "permissions.json"
+# Logging konfigurieren
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    handlers=[
+        logging.FileHandler('insurance_bot.log', encoding='utf-8'),
+        logging.StreamHandler()
+    ]
+)
+logger = logging.getLogger('InsuranceBot')
 
-def load_config():
-    """Lädt die Konfiguration aus der JSON-Datei."""
-    if os.path.exists(CONFIG_FILE):
-        with open(CONFIG_FILE, 'r', encoding='utf-8') as f:
-            return json.load(f)
-    return {
-        "servers": {}
-    }
-
-def save_config(config):
-    """Speichert die Konfiguration in der JSON-Datei."""
-    with open(CONFIG_FILE, 'w', encoding='utf-8') as f:
-        json.dump(config, f, indent=4, ensure_ascii=False)
-
-def load_ai_training():
-    """Lädt AI Training Daten."""
-    if os.path.exists(AI_TRAINING_FILE):
-        with open(AI_TRAINING_FILE, 'r', encoding='utf-8') as f:
-            return json.load(f)
-    return {"servers": {}}
-
-def save_ai_training(data):
-    """Speichert AI Training Daten."""
-    with open(AI_TRAINING_FILE, 'w', encoding='utf-8') as f:
-        json.dump(data, f, indent=4, ensure_ascii=False)
-
-def load_permissions():
-    """Lädt Berechtigungen."""
-    if os.path.exists(PERMISSIONS_FILE):
-        with open(PERMISSIONS_FILE, 'r', encoding='utf-8') as f:
-            return json.load(f)
-    return {"servers": {}}
-
-def save_permissions(data):
-    """Speichert Berechtigungen."""
-    with open(PERMISSIONS_FILE, 'w', encoding='utf-8') as f:
-        json.dump(data, f, indent=4, ensure_ascii=False)
-
-# Konfiguration laden
-config = load_config()
-save_config(config)
-ai_training = load_ai_training()
-permissions = load_permissions()
-
-# --- Bot Initialisierung ---
+# Bot Setup
 intents = discord.Intents.default()
 intents.message_content = True
 intents.members = True
 bot = commands.Bot(command_prefix="!", intents=intents)
 
-# --- Hilfsfunktionen ---
+# Datenspeicherung
+DATA_FILE = "insurance_data.json"
+CONFIG_FILE = "bot_config.json"
 
-def get_server_config(guild_id: int) -> dict:
-    """Gibt die Server-spezifische Konfiguration zurück."""
-    # Stelle sicher, dass "servers" existiert
-    if "servers" not in config:
-        config["servers"] = {}
-        save_config(config)
+def load_config():
+    if os.path.exists(CONFIG_FILE):
+        with open(CONFIG_FILE, 'r', encoding='utf-8') as f:
+            return json.load(f)
+    return {"log_channel_id": None, "company_account_id": None}
 
-    guild_id_str = str(guild_id)
-    if guild_id_str not in config["servers"]:
-        config["servers"][guild_id_str] = {
-            "log_channel_id": 0,
-            "staff_role_id": 0,
-            "ai_training_channel_id": 0,
-            "transcript_path": f"transcripts/{guild_id}",
-            "embed_colors": {
-                "default": 0x5865F2,
-                "success": 0x57F287,
-                "error": 0xED4245,
-                "warning": 0xFEE75C,
-                "info": 0x5865F2
-            },
-            "panels": {},
-            "multipanels": {},
-            "ticket_counter": 0
-        }
-        save_config(config)
-        print(f"✅ Neue Server-Konfiguration erstellt für Guild ID: {guild_id}")
+def save_config(config):
+    with open(CONFIG_FILE, 'w', encoding='utf-8') as f:
+        json.dump(config, f, indent=4)
 
-    # Transkript-Ordner erstellen
-    transcript_path = config["servers"][guild_id_str].get("transcript_path", f"transcripts/{guild_id}")
-    if not os.path.exists(transcript_path):
-        os.makedirs(transcript_path)
+config = load_config()
 
-    return config["servers"][guild_id_str]
+def load_data():
+    if os.path.exists(DATA_FILE):
+        with open(DATA_FILE, 'r', encoding='utf-8') as f:
+            logger.info("Daten erfolgreich geladen")
+            return json.load(f)
+    logger.warning("Keine Datendatei gefunden, erstelle neue Datenstruktur")
+    return {"customers": {}, "invoices": {}, "logs": []}
 
-def get_color(guild_id: int, color_type: str) -> int:
-    """Gibt die konfigurierte Farbe zurück."""
-    server_config = get_server_config(guild_id)
-    return server_config.get("embed_colors", {}).get(color_type, 0x5865F2)
+def save_data(data):
+    with open(DATA_FILE, 'w', encoding='utf-8') as f:
+        json.dump(data, f, indent=4, ensure_ascii=False)
+    logger.info("Daten erfolgreich gespeichert")
 
-def has_permission(user_id: int, guild_id: int, command_name: str) -> bool:
-    """Prüft, ob ein User Berechtigung für einen Command hat."""
-    # Stelle sicher, dass "servers" existiert
-    if "servers" not in permissions:
-        permissions["servers"] = {}
-        save_permissions(permissions)
+def generate_customer_id():
+    """Generiert eine komplexe Kunden-ID"""
+    prefix = "VN"
+    year = datetime.now().strftime("%y")
+    random_part = ''.join(random.choices(string.digits, k=6))
+    return f"{prefix}-{year}{random_part}"
 
-    guild_id_str = str(guild_id)
-    user_id_str = str(user_id)
+def generate_invoice_id():
+    """Generiert eine komplexe Rechnungs-ID"""
+    prefix = "RE"
+    year = datetime.now().strftime("%y")
+    month = datetime.now().strftime("%m")
+    random_part = ''.join(random.choices(string.ascii_uppercase + string.digits, k=4))
+    return f"{prefix}-{year}{month}-{random_part}"
 
-    if guild_id_str not in permissions["servers"]:
-        return False
-
-    user_perms = permissions["servers"][guild_id_str].get("users", {}).get(user_id_str, [])
-    return command_name in user_perms or "*" in user_perms
-
-def is_staff(member: discord.Member, staff_role_id: int = None) -> bool:
-    """Prüft, ob ein Mitglied Staff ist."""
-    if staff_role_id is None:
-        server_config = get_server_config(member.guild.id)
-        staff_role_id = server_config.get("staff_role_id", 0)
-    return any(role.id == staff_role_id for role in member.roles)
-
-async def log_action(guild: discord.Guild, message: str, color_type: str = "info"):
-    """Sendet eine Log-Nachricht."""
-    server_config = get_server_config(guild.id)
-    log_channel_id = server_config.get("log_channel_id", 0)
-    log_channel = guild.get_channel(log_channel_id)
-    if log_channel and isinstance(log_channel, discord.TextChannel):
-        embed = discord.Embed(
-            description=message,
-            color=get_color(guild.id, color_type),
-            timestamp=datetime.now()
-        )
-        await log_channel.send(embed=embed)
-
-async def create_transcript(channel: discord.TextChannel) -> Optional[str]:
-    """Erstellt ein Transkript des Kanals."""
-    server_config = get_server_config(channel.guild.id)
-    transcript_path = server_config.get("transcript_path", f"transcripts/{channel.guild.id}")
-    filename = f"{transcript_path}/transcript-{channel.name}-{channel.id}-{datetime.now().strftime('%Y%m%d-%H%M%S')}.txt"
-
-    content = [
-        f"╔══════════════════════════════════════════════════════════╗",
-        f"║  TICKET TRANSCRIPT - #{channel.name}",
-        f"║  Kanal ID: {channel.id}",
-        f"║  Erstellt am: {datetime.now().strftime('%d.%m.%Y um %H:%M:%S')}",
-        f"╚══════════════════════════════════════════════════════════╝\n"
-    ]
-
-    try:
-        messages = [msg async for msg in channel.history(limit=1000, oldest_first=True)]
-        for msg in messages:
-            timestamp = msg.created_at.strftime("%d.%m.%Y %H:%M:%S")
-            line = f"[{timestamp}] {msg.author.display_name} ({msg.author.id}):"
-            if msg.content:
-                line += f"\n  {msg.content}"
-            if msg.attachments:
-                line += f"\n  📎 Anhänge: {', '.join([a.url for a in msg.attachments])}"
-            if msg.embeds:
-                line += f"\n  📋 {len(msg.embeds)} Embed(s)"
-            content.append(line + "\n")
-    except discord.Forbidden:
-        return None
-
-    with open(filename, "w", encoding="utf-8") as f:
-        f.write("\n".join(content))
-
-    return filename
-
-def get_ai_response(guild_id: int, reason: str) -> Optional[str]:
-    """Generiert eine KI-Antwort basierend auf trainierten Keywords."""
-    # Stelle sicher, dass "servers" existiert
-    if "servers" not in ai_training:
-        ai_training["servers"] = {}
-        save_ai_training(ai_training)
-
-    guild_id_str = str(guild_id)
-    if guild_id_str not in ai_training["servers"]:
-        return None
-
-    reason_lower = reason.lower()
-    keywords = ai_training["servers"][guild_id_str].get("keywords", {})
-
-    for keyword, response in keywords.items():
-        if keyword.lower() in reason_lower:
-            return response
-
-    return None
-
-async def request_ai_training(channel: discord.TextChannel, reason: str, ticket_id: int, creator: discord.Member):
-    """Fordert AI-Training vom Staff an."""
-    server_config = get_server_config(channel.guild.id)
-    ai_channel_id = server_config.get("ai_training_channel_id", 0)
-    if not ai_channel_id:
-        return
-
-    ai_channel = channel.guild.get_channel(ai_channel_id)
-    if not ai_channel:
-        return
-
-    staff_role = channel.guild.get_role(server_config.get("staff_role_id", 0))
-
-    embed = discord.Embed(
-        title="🤖 KI-Training benötigt",
-        description=f"Ein neues Ticket wurde erstellt, aber die KI konnte keine passende Antwort finden.\n\n**Ticket:** <#{channel.id}>\n**Ersteller:** {creator.mention}\n**Grund:**\n```{reason[:500]}```",
-        color=get_color(channel.guild.id, "warning"),
-        timestamp=datetime.now()
-    )
-    embed.add_field(name="📝 Aktion erforderlich", value="Nutze die Buttons unten, um der KI beizubringen, wie sie auf ähnliche Anfragen reagieren soll.", inline=False)
-
-    training_id = f"train_{ticket_id}_{int(datetime.now().timestamp())}"
-    guild_id_str = str(channel.guild.id)
-
-    if guild_id_str not in ai_training["servers"]:
-        ai_training["servers"][guild_id_str] = {"keywords": {}, "pending_training": {}}
-
-    ai_training["servers"][guild_id_str].setdefault("pending_training", {})[training_id] = {
-        "reason": reason,
-        "ticket_id": ticket_id,
-        "channel_id": channel.id
-    }
-    save_ai_training(ai_training)
-
-    await ai_channel.send(
-        content=staff_role.mention if staff_role else "@Staff",
-        embed=embed,
-        view=AITrainingView(training_id, reason, channel.guild.id)
-    )
-
-# --- Modals ---
-
-class TicketReasonModal(ui.Modal):
-    """Modal für die Ticket-Erstellung."""
-
-    reason_input = ui.TextInput(
-        label='Dein Anliegen',
-        style=discord.TextStyle.paragraph,
-        placeholder='Beschreibe dein Problem so genau wie möglich...',
-        required=True,
-        max_length=1500,
-        min_length=10
-    )
-
-    def __init__(self, panel_key: str, panel_data: dict, guild_id: int):
-        super().__init__(title=f'Ticket: {panel_data["label"]}')
-        self.panel_key = panel_key
-        self.panel_data = panel_data
-        self.guild_id = guild_id
-
-    async def on_submit(self, interaction: discord.Interaction):
-        await interaction.response.defer(ephemeral=True)
-
-        user = interaction.user
-        guild = interaction.guild
-        reason = self.reason_input.value
-        server_config = get_server_config(guild.id)
-
-        category = guild.get_channel(self.panel_data['category_id'])
-        if not category or not isinstance(category, discord.CategoryChannel):
-            await interaction.followup.send(
-                f"❌ Fehler: Kategorie nicht gefunden. Bitte kontaktiere einen Administrator.",
-                ephemeral=True
-            )
-            return
-
-        staff_role_id = self.panel_data.get('staff_role_id', server_config.get('staff_role_id', 0))
-        staff_role = guild.get_role(staff_role_id)
-        if not staff_role:
-            await interaction.followup.send(
-                f"❌ Fehler: Staff-Rolle nicht konfiguriert.",
-                ephemeral=True
-            )
-            return
-
-        # Ticket-Nummer aus Counter generieren
-        server_config["ticket_counter"] = server_config.get("ticket_counter", 0) + 1
-        ticket_number = server_config["ticket_counter"]
-        save_config(config)
-
-        overwrites = {
-            guild.default_role: discord.PermissionOverwrite(view_channel=False),
-            user: discord.PermissionOverwrite(view_channel=True, send_messages=True, attach_files=True, embed_links=True),
-            staff_role: discord.PermissionOverwrite(view_channel=True, send_messages=True, attach_files=True, embed_links=True, manage_messages=True),
-            guild.me: discord.PermissionOverwrite(view_channel=True, send_messages=True, manage_channels=True)
-        }
-
-        ticket_channel = await guild.create_text_channel(
-            name=f"{self.panel_key}-{ticket_number:04d}",
-            category=category,
-            overwrites=overwrites,
-            topic=f"Ticket von {user.name} | Typ: {self.panel_data['label']} | ID: {user.id}"
-        )
-
-        welcome_embed = discord.Embed(
-            title=f"{self.panel_data.get('emoji', '🎫')} {self.panel_data['label']}",
-            description=f"Vielen Dank, dass Sie uns kontaktiert haben. Ein Mitglied unseres Teams wird sich gleich bei Ihnen melden. Wir bitten Sie um Verständnis bei der Wartezeit.",
-            color=get_color(guild.id, "default")
-        )
-        welcome_embed.add_field(
-            name="❓ Reason",
-            value=f"```{reason[:1000]}```",
-            inline=False
-        )
-        welcome_embed.set_footer(text="© Custom Tickets by Custom Discord Development", icon_url=bot.user.display_avatar.url)
-        welcome_embed.timestamp = datetime.now()
-
-        await ticket_channel.send(
-            content=f"{user.mention} {staff_role.mention}",
-            embed=welcome_embed,
-            view=TicketControlView(user.id, ticket_number, self.panel_key, staff_role_id, guild.id)
-        )
-
-        ai_response = get_ai_response(guild.id, reason)
-        if ai_response:
-            ai_embed = discord.Embed(
-                description=f"🤖 **KI-Support Vorschlag:**\n{ai_response}",
-                color=get_color(guild.id, "info")
-            )
-            await ticket_channel.send(embed=ai_embed)
-        else:
-            await request_ai_training(ticket_channel, reason, ticket_number, user)
-
-        await interaction.followup.send(
-            f"✅ Dein Ticket wurde erstellt: {ticket_channel.mention}",
-            ephemeral=True
-        )
-
-        await log_action(
-            guild,
-            f"🎫 **Neues Ticket erstellt**\n"
-            f"**Ersteller:** {user.mention} (`{user.id}`)\n"
-            f"**Kanal:** {ticket_channel.mention}\n"
-            f"**Typ:** {self.panel_data['label']}\n"
-            f"**Grund:** {reason[:200]}...",
-            "success"
-        )
-
-class PanelCreateModal(ui.Modal):
-    """Modal zum Erstellen eines neuen Panels."""
-
-    panel_id = ui.TextInput(
-        label='Panel ID (eindeutig, keine Leerzeichen)',
-        placeholder='z.B. support, bug, payment',
-        required=True,
-        max_length=50
-    )
-
-    label = ui.TextInput(
-        label='Panel Name/Label',
-        placeholder='z.B. Allgemeiner Support',
-        required=True,
-        max_length=100
-    )
-
-    emoji = ui.TextInput(
-        label='Emoji',
-        placeholder='z.B. 🛠️',
-        required=True,
-        max_length=10
-    )
-
-    category_id = ui.TextInput(
-        label='Kategorie ID',
-        placeholder='Rechtsklick auf Kategorie > ID kopieren',
-        required=True,
-        max_length=20
-    )
-
-    staff_role_id = ui.TextInput(
-        label='Staff Rollen ID für dieses Panel',
-        placeholder='Rechtsklick auf Rolle > ID kopieren',
-        required=True,
-        max_length=20
-    )
-
-    def __init__(self, guild_id: int):
-        super().__init__(title='Neues Panel erstellen')
-        self.guild_id = guild_id
-
-    async def on_submit(self, interaction: discord.Interaction):
-        panel_key = self.panel_id.value.lower().replace(" ", "_")
-        server_config = get_server_config(self.guild_id)
-
-        if panel_key in server_config.get("panels", {}):
-            await interaction.response.send_message(
-                f"❌ Ein Panel mit der ID `{panel_key}` existiert bereits!",
-                ephemeral=True
-            )
-            return
-
+async def send_to_log_channel(guild, embed):
+    """Sendet eine Nachricht in den Log-Channel"""
+    if config["log_channel_id"]:
         try:
-            category_id = int(self.category_id.value)
-            category = interaction.guild.get_channel(category_id)
-            if not category or not isinstance(category, discord.CategoryChannel):
-                await interaction.response.send_message(
-                    f"❌ Kategorie mit ID `{category_id}` nicht gefunden!",
-                    ephemeral=True
-                )
-                return
-        except ValueError:
-            await interaction.response.send_message(
-                f"❌ Ungültige Kategorie-ID!",
-                ephemeral=True
-            )
-            return
-
-        try:
-            staff_role_id = int(self.staff_role_id.value)
-            staff_role = interaction.guild.get_role(staff_role_id)
-            if not staff_role:
-                await interaction.response.send_message(
-                    f"❌ Staff-Rolle mit ID `{staff_role_id}` nicht gefunden!",
-                    ephemeral=True
-                )
-                return
-        except ValueError:
-            await interaction.response.send_message(
-                f"❌ Ungültige Staff-Rollen-ID!",
-                ephemeral=True
-            )
-            return
-
-        if "panels" not in server_config:
-            server_config["panels"] = {}
-
-        server_config["panels"][panel_key] = {
-            "label": self.label.value,
-            "emoji": self.emoji.value,
-            "category_id": category_id,
-            "staff_role_id": staff_role_id,
-            "enabled": True,
-            "description": ""
-        }
-
-        save_config(config)
-
-        # Öffne Description Modal
-        await interaction.response.send_modal(PanelDescriptionModal(panel_key, self.guild_id))
-
-class PanelDescriptionModal(ui.Modal):
-    """Modal für Panel-Beschreibung."""
-
-    description_input = ui.TextInput(
-        label='Panel Beschreibung',
-        style=discord.TextStyle.paragraph,
-        placeholder='Beschreibe, wofür dieses Panel verwendet wird...',
-        required=True,
-        max_length=1000
-    )
-
-    def __init__(self, panel_key: str, guild_id: int):
-        super().__init__(title='Panel Beschreibung')
-        self.panel_key = panel_key
-        self.guild_id = guild_id
-
-    async def on_submit(self, interaction: discord.Interaction):
-        server_config = get_server_config(self.guild_id)
-        server_config["panels"][self.panel_key]["description"] = self.description_input.value
-        save_config(config)
-
-        panel = server_config["panels"][self.panel_key]
-        success_embed = discord.Embed(
-            title="✅ Panel erstellt",
-            description=f"Das Panel **{panel['label']}** wurde erfolgreich erstellt!",
-            color=get_color(self.guild_id, "success")
-        )
-        success_embed.add_field(name="Panel ID", value=f"`{self.panel_key}`", inline=True)
-        success_embed.add_field(name="Emoji", value=panel['emoji'], inline=True)
-        success_embed.add_field(name="Kategorie", value=f"<#{panel['category_id']}>", inline=True)
-        success_embed.add_field(name="Staff Rolle", value=f"<@&{panel['staff_role_id']}>", inline=True)
-        success_embed.add_field(name="Beschreibung", value=self.description_input.value, inline=False)
-
-        await interaction.response.send_message(embed=success_embed, ephemeral=True)
-
-class CloseReasonModal(ui.Modal):
-    """Modal für Close with Reason."""
-
-    reason_input = ui.TextInput(
-        label='Grund für das Schließen',
-        style=discord.TextStyle.paragraph,
-        placeholder='Warum wird dieses Ticket geschlossen?',
-        required=True,
-        max_length=500
-    )
-
-    def __init__(self, ticket_view):
-        super().__init__(title='Ticket schließen')
-        self.ticket_view = ticket_view
-
-    async def on_submit(self, interaction: discord.Interaction):
-        reason = self.reason_input.value
-
-        for item in self.ticket_view.children:
-            item.disabled = True
-        await interaction.response.edit_message(view=self.ticket_view)
-
-        closing_embed = discord.Embed(
-            description=f"🔐 **Ticket wird geschlossen...**\n**Grund:** {reason}\n\nTranskript wird erstellt und der Kanal wird in 5 Sekunden gelöscht.",
-            color=get_color(interaction.guild.id, "warning")
-        )
-        await interaction.followup.send(embed=closing_embed)
-
-        await asyncio.sleep(3)
-        await self.ticket_view.close_ticket(interaction.channel, interaction.user, reason)
-
-class AITrainingModal(ui.Modal):
-    """Modal für AI Training."""
-
-    response_input = ui.TextInput(
-        label='KI-Antwort für ähnliche Anfragen',
-        style=discord.TextStyle.paragraph,
-        placeholder='Was soll die KI bei ähnlichen Anfragen antworten?',
-        required=True,
-        max_length=1000
-    )
-
-    keywords_input = ui.TextInput(
-        label='Keywords (kommagetrennt)',
-        placeholder='z.B. rolle, rank, berechtigung',
-        required=True,
-        max_length=200
-    )
-
-    def __init__(self, training_id: str, original_reason: str, guild_id: int):
-        super().__init__(title='KI Training')
-        self.training_id = training_id
-        self.original_reason = original_reason
-        self.guild_id = guild_id
-
-    async def on_submit(self, interaction: discord.Interaction):
-        response = self.response_input.value
-        keywords = [k.strip().lower() for k in self.keywords_input.value.split(',')]
-
-        guild_id_str = str(self.guild_id)
-        if guild_id_str not in ai_training["servers"]:
-            ai_training["servers"][guild_id_str] = {"keywords": {}, "pending_training": {}}
-
-        for keyword in keywords:
-            ai_training["servers"][guild_id_str]["keywords"][keyword] = response
-
-        if self.training_id in ai_training["servers"][guild_id_str].get("pending_training", {}):
-            del ai_training["servers"][guild_id_str]["pending_training"][self.training_id]
-
-        save_ai_training(ai_training)
-
-        success_embed = discord.Embed(
-            title="✅ KI Training abgeschlossen",
-            description=f"Die KI wurde erfolgreich trainiert!\n\n**Keywords:** {', '.join(keywords)}\n**Antwort:** {response[:200]}...",
-            color=get_color(self.guild_id, "success")
-        )
-
-        await interaction.response.send_message(embed=success_embed, ephemeral=True)
-
-        try:
-            await interaction.message.edit(view=None)
-        except:
-            pass
-
-# --- Views ---
-
-class TicketLauncherView(ui.View):
-    """Hauptview mit Buttons für jedes Panel."""
-
-    def __init__(self, guild_id: int, panel_keys: List[str] = None):
-        super().__init__(timeout=None)
-        self.guild_id = guild_id
-        self.panel_keys = panel_keys
-        self.build_buttons()
-
-    def build_buttons(self):
-        """Erstellt Buttons für ausgewählte oder alle Panels."""
-        self.clear_items()
-
-        server_config = get_server_config(self.guild_id)
-        panels = server_config.get("panels", {})
-
-        if self.panel_keys:
-            panels = {k: v for k, v in panels.items() if k in self.panel_keys}
-
-        for key, panel in panels.items():
-            if not panel.get("enabled", True):
-                continue
-
-            button = ui.Button(
-                label=panel.get("label", key),
-                emoji=panel.get("emoji", "🎫"),
-                style=discord.ButtonStyle.primary,
-                custom_id=f"ticket_create_{self.guild_id}_{key}"
-            )
-            button.callback = self.create_button_callback(key, panel)
-            self.add_item(button)
-
-    def create_button_callback(self, panel_key: str, panel_data: dict):
-        async def callback(interaction: discord.Interaction):
-            await interaction.response.send_modal(TicketReasonModal(panel_key, panel_data, self.guild_id))
-        return callback
-
-class TicketControlView(ui.View):
-    """Kontroll-Buttons für Ticket-Management."""
-
-    def __init__(self, creator_id: int, ticket_number: int, panel_key: str, staff_role_id: int, guild_id: int):
-        super().__init__(timeout=None)
-        self.creator_id = creator_id
-        self.ticket_number = ticket_number
-        self.panel_key = panel_key
-        self.staff_role_id = staff_role_id
-        self.guild_id = guild_id
-        self.claimed_by = None
-
-    @ui.button(label="Claim", emoji="🔰", style=discord.ButtonStyle.success, custom_id="ticket_claim")
-    async def claim_button(self, interaction: discord.Interaction, button: ui.Button):
-        if not is_staff(interaction.user, self.staff_role_id):
-            await interaction.response.send_message(
-                "❌ Nur das Staff-Team dieses Tickets kann es claimen.",
-                ephemeral=True
-            )
-            return
-
-        if self.claimed_by:
-            await interaction.response.send_message(
-                f"❌ Dieses Ticket wurde bereits von <@{self.claimed_by}> geclaimed.",
-                ephemeral=True
-            )
-            return
-
-        self.claimed_by = interaction.user.id
-        button.label = f"Claimed"
-        button.style = discord.ButtonStyle.secondary
-        button.disabled = True
-
-        await interaction.message.edit(view=self)
-
-        claim_embed = discord.Embed(
-            description=f"🔰 **Ticket geclaimed von {interaction.user.mention}**",
-            color=get_color(self.guild_id, "success"),
-            timestamp=datetime.now()
-        )
-        await interaction.response.send_message(embed=claim_embed)
-
-        await log_action(
-            interaction.guild,
-            f"🔰 **Ticket geclaimed**\n**Kanal:** {interaction.channel.mention}\n**Claimer:** {interaction.user.mention}",
-            "info"
-        )
-
-    @ui.button(label="Close", emoji="🔒", style=discord.ButtonStyle.danger, custom_id="ticket_close")
-    async def close_button(self, interaction: discord.Interaction, button: ui.Button):
-        if not is_staff(interaction.user, self.staff_role_id):
-            await interaction.response.send_message(
-                "❌ Nur das Staff-Team dieses Tickets kann es schließen.",
-                ephemeral=True
-            )
-            return
-
-        confirm_embed = discord.Embed(
-            title="⚠️ Bestätigung erforderlich",
-            description="Bist du sicher, dass du dieses Ticket schließen möchtest?",
-            color=get_color(self.guild_id, "warning")
-        )
-
-        await interaction.response.send_message(
-            embed=confirm_embed,
-            view=ConfirmCloseView(self, None),
-            ephemeral=True
-        )
-
-    @ui.button(label="Close With Reason", emoji="📝", style=discord.ButtonStyle.danger, custom_id="ticket_close_reason")
-    async def close_reason_button(self, interaction: discord.Interaction, button: ui.Button):
-        if not is_staff(interaction.user, self.staff_role_id):
-            await interaction.response.send_message(
-                "❌ Nur das Staff-Team dieses Tickets kann es schließen.",
-                ephemeral=True
-            )
-            return
-
-        await interaction.response.send_modal(CloseReasonModal(self))
-
-    async def close_ticket(self, channel: discord.TextChannel, closer: discord.Member, reason: str = None):
-        """Schließt das Ticket mit Tickets v2 Style Log."""
-        guild = channel.guild
-
-        opener = guild.get_member(self.creator_id)
-        opener_mention = opener.mention if opener else f"<@{self.creator_id}>"
-
-        open_time = "Nicht verfügbar"
-        try:
-            created_at = channel.created_at
-            open_time = f"{created_at.strftime('%d. %B %Y')} um {created_at.strftime('%H:%M')}"
-        except:
-            pass
-
-        transcript_path = await create_transcript(channel)
-
-        close_embed = discord.Embed(
-            title="Ticket Closed",
-            color=get_color(self.guild_id, "success")
-        )
-
-        close_embed.set_author(name=guild.name, icon_url=guild.icon.url if guild.icon else None)
-
-        close_embed.add_field(
-            name="<:TicketID:1458138937703796958> Ticket ID",
-            value=f"{self.ticket_number}",
-            inline=True
-        )
-        close_embed.add_field(
-            name="<:Openedby:1458138940094808084> Opened By",
-            value=opener_mention,
-            inline=True
-        )
-        close_embed.add_field(
-            name="<:Closedby:1458138943504781536> Closed By",
-            value=closer.mention,
-            inline=True
-        )
-
-        close_embed.add_field(
-            name="<:OpenTime:1458138941814472867> Open Time",
-            value=open_time,
-            inline=True
-        )
-        close_embed.add_field(
-            name="<:Claimedby:1458138947451359438> Claimed By",
-            value=f"<@{self.claimed_by}>" if self.claimed_by else "Not claimed",
-            inline=True
-        )
-
-        if reason:
-            close_embed.add_field(
-                name="<:Reason:1458138945773895804> Reason",
-                value=reason,
-                inline=False
-            )
-        else:
-            close_embed.add_field(
-                name="<:Reason:1458138945773895804> Reason",
-                value="No reason given!",
-                inline=False
-            )
-
-        close_embed.set_footer(text="© Custom Tickets by Custom Discord Development", icon_url=bot.user.display_avatar.url)
-
-        server_config = get_server_config(self.guild_id)
-        log_channel = guild.get_channel(server_config.get("log_channel_id", 0))
-        if log_channel and transcript_path:
-            try:
-                transcript_file = discord.File(transcript_path, filename=f"transcript-{self.ticket_number:04d}.txt")
-                await log_channel.send(embed=close_embed, file=transcript_file)
-                os.remove(transcript_path)
-            except Exception as e:
-                await log_channel.send(embed=close_embed)
-                print(f"Fehler beim Senden des Transkripts: {e}")
-
-        if opener:
-            try:
-                await opener.send(embed=close_embed)
-            except:
-                pass
-
-        try:
-            await channel.delete(reason=f"Ticket geschlossen von {closer.name}")
+            log_channel = guild.get_channel(config["log_channel_id"])
+            if log_channel:
+                await log_channel.send(embed=embed)
+                logger.info(f"Log an Channel {config['log_channel_id']} gesendet")
         except Exception as e:
-            print(f"Fehler beim Löschen des Kanals: {e}")
-
-class ConfirmCloseView(ui.View):
-    """Bestätigungs-View für Close."""
-
-    def __init__(self, ticket_view, reason: str = None):
-        super().__init__(timeout=60)
-        self.ticket_view = ticket_view
-        self.reason = reason
-
-    @ui.button(label="Ja, schließen", style=discord.ButtonStyle.danger, emoji="✅")
-    async def confirm_button(self, interaction: discord.Interaction, button: ui.Button):
-        for item in self.ticket_view.children:
-            item.disabled = True
-
-        try:
-            original_msg = [msg async for msg in interaction.channel.history(limit=10) if msg.embeds and msg.author == interaction.guild.me][0]
-            await original_msg.edit(view=self.ticket_view)
-        except:
-            pass
-
-        closing_embed = discord.Embed(
-            description="🔐 **Ticket wird geschlossen...**\nTranskript wird erstellt und der Kanal wird in 5 Sekunden gelöscht.",
-            color=get_color(interaction.guild.id, "warning")
-        )
-        await interaction.response.send_message(embed=closing_embed)
-
-        await asyncio.sleep(3)
-        await self.ticket_view.close_ticket(interaction.channel, interaction.user, self.reason)
-
-    @ui.button(label="Abbrechen", style=discord.ButtonStyle.secondary, emoji="❌")
-    async def cancel_button(self, interaction: discord.Interaction, button: ui.Button):
-        await interaction.response.send_message("❌ Aktion abgebrochen.", ephemeral=True)
-        self.stop()
-
-class AITrainingView(ui.View):
-    """View für AI Training."""
-
-    def __init__(self, training_id: str, reason: str, guild_id: int):
-        super().__init__(timeout=None)
-        self.training_id = training_id
-        self.reason = reason
-        self.guild_id = guild_id
-
-    @ui.button(label="KI Trainieren", style=discord.ButtonStyle.primary, emoji="🤖")
-    async def train_button(self, interaction: discord.Interaction, button: ui.Button):
-        await interaction.response.send_modal(AITrainingModal(self.training_id, self.reason, self.guild_id))
-
-    @ui.button(label="Ignorieren", style=discord.ButtonStyle.secondary, emoji="🚫")
-    async def ignore_button(self, interaction: discord.Interaction, button: ui.Button):
-        guild_id_str = str(self.guild_id)
-        if guild_id_str in ai_training.get("servers", {}):
-            if self.training_id in ai_training["servers"][guild_id_str].get("pending_training", {}):
-                del ai_training["servers"][guild_id_str]["pending_training"][self.training_id]
-                save_ai_training(ai_training)
-
-        await interaction.response.send_message("✅ Training-Anfrage ignoriert.", ephemeral=True)
-        await interaction.message.edit(view=None)
-
-class PanelSelectView(ui.View):
-    """View für Multipanel-Auswahl."""
-
-    def __init__(self, multipanel_id: str, guild_id: int):
-        super().__init__(timeout=180)
-        self.multipanel_id = multipanel_id
-        self.guild_id = guild_id
-        self.selected_panels = []
-
-        server_config = get_server_config(guild_id)
-        panels = server_config.get("panels", {})
-        options = []
-
-        for key, panel in panels.items():
-            options.append(discord.SelectOption(
-                label=panel.get("label", key),
-                value=key,
-                emoji=panel.get("emoji", "🎫"),
-                description=f"Kategorie: {panel.get('category_id')}"
-            ))
-
-        if options:
-            select = ui.Select(
-                placeholder="Wähle Panels für dieses Multipanel...",
-                options=options[:25],
-                min_values=1,
-                max_values=min(len(options), 25)
-            )
-            select.callback = self.select_callback
-            self.add_item(select)
-
-    async def select_callback(self, interaction: discord.Interaction):
-        self.selected_panels = interaction.data['values']
-        server_config = get_server_config(self.guild_id)
-
-        await interaction.response.send_message(
-            f"✅ **{len(self.selected_panels)} Panels ausgewählt:**\n" + 
-            "\n".join([f"• {server_config['panels'][p]['label']}" for p in self.selected_panels]),
-            ephemeral=True
-        )
-
-    @ui.button(label="Multipanel Speichern", style=discord.ButtonStyle.success, emoji="💾", row=1)
-    async def save_button(self, interaction: discord.Interaction, button: ui.Button):
-        if not self.selected_panels:
-            await interaction.response.send_message("❌ Bitte wähle zuerst Panels aus!", ephemeral=True)
-            return
-
-        server_config = get_server_config(self.guild_id)
-        if "multipanels" not in server_config:
-            server_config["multipanels"] = {}
-
-        server_config["multipanels"][self.multipanel_id] = {
-            "panels": self.selected_panels,
-            "created_by": interaction.user.id,
-            "created_at": datetime.now().isoformat()
-        }
-
-        save_config(config)
-
-        success_embed = discord.Embed(
-            title="✅ Multipanel erstellt",
-            description=f"Das Multipanel **{self.multipanel_id}** wurde mit {len(self.selected_panels)} Panels erstellt!",
-            color=get_color(self.guild_id, "success")
-        )
-
-        await interaction.response.send_message(embed=success_embed, ephemeral=True)
-        self.stop()
-
-# --- Permission Check Decorator ---
-def check_permission(command_name: str):
-    async def predicate(interaction: discord.Interaction) -> bool:
-        if interaction.user.guild_permissions.administrator:
-            return True
-        if has_permission(interaction.user.id, interaction.guild.id, command_name):
-            return True
-        raise app_commands.MissingPermissions(['administrator'])
-    return app_commands.check(predicate)
-
-# --- Admin Commands ---
-
-@bot.tree.command(name="ticket_setup", description="🎫 Sendet das Ticket-Panel in diesen Kanal")
-@check_permission("ticket_setup")
-@app_commands.describe(multipanel="Optional: Name des Multipanels, das gesendet werden soll")
-async def ticket_setup(interaction: discord.Interaction, multipanel: str = None):
-    """Sendet das Ticket-Panel oder ein Multipanel."""
-    server_config = get_server_config(interaction.guild.id)
-
-    if multipanel:
-        if multipanel not in server_config.get("multipanels", {}):
-            await interaction.response.send_message(
-                f"❌ Multipanel `{multipanel}` existiert nicht!",
-                ephemeral=True
-            )
-            return
-
-        panel_keys = server_config["multipanels"][multipanel]["panels"]
-
-        # Erstelle Embed mit allen Panel-Beschreibungen
-        main_embed = discord.Embed(
-            title="🎫 Support Tickets",
-            description="Willkommen beim Support-System!\n\nWähle unten den passenden Grund für dein Ticket aus.",
-            color=get_color(interaction.guild.id, "default")
-        )
-
-        # Füge Panel-Beschreibungen hinzu
-        for panel_key in panel_keys:
-            if panel_key in server_config.get("panels", {}):
-                panel = server_config["panels"][panel_key]
-                panel_desc = panel.get("description", "Keine Beschreibung verfügbar")
-                main_embed.add_field(
-                    name=f"{panel.get('emoji', '🎫')} {panel.get('label', panel_key)}",
-                    value=panel_desc,
-                    inline=False
-                )
-
-        main_embed.set_footer(text="© Custom Tickets by Custom Discord Development")
-
-        await interaction.channel.send(embed=main_embed, view=TicketLauncherView(interaction.guild.id, panel_keys))
-        await interaction.response.send_message(f"✅ Multipanel **{multipanel}** wurde gesendet!", ephemeral=True)
-
-    else:
-        if not server_config.get("panels"):
-            await interaction.response.send_message(
-                "❌ Es sind noch keine Panels konfiguriert!",
-                ephemeral=True
-            )
-            return
-
-        # Erstelle Embed mit allen Panel-Beschreibungen
-        main_embed = discord.Embed(
-            title="🎫 Support Tickets",
-            description="Willkommen beim Support-System!\n\nWähle unten den passenden Grund für dein Ticket aus.",
-            color=get_color(interaction.guild.id, "default")
-        )
-
-        # Füge alle Panel-Beschreibungen hinzu
-        for panel_key, panel in server_config.get("panels", {}).items():
-            if panel.get("enabled", True):
-                panel_desc = panel.get("description", "Keine Beschreibung verfügbar")
-                main_embed.add_field(
-                    name=f"{panel.get('emoji', '🎫')} {panel.get('label', panel_key)}",
-                    value=panel_desc,
-                    inline=False
-                )
-
-        main_embed.set_footer(text="© Custom Tickets by Custom Discord Development")
-
-        await interaction.channel.send(embed=main_embed, view=TicketLauncherView(interaction.guild.id))
-        await interaction.response.send_message("✅ Ticket-Panel wurde gesendet!", ephemeral=True)
-
-@bot.tree.command(name="panel_send", description="📤 Sendet ein einzelnes Panel in einen Kanal")
-@check_permission("panel_send")
-@app_commands.describe(
-    panel_id="Die ID des Panels",
-    channel="Der Kanal (optional, Standard: aktueller Kanal)"
-)
-async def panel_send(interaction: discord.Interaction, panel_id: str, channel: discord.TextChannel = None):
-    """Sendet ein einzelnes Panel."""
-    server_config = get_server_config(interaction.guild.id)
-
-    if panel_id not in server_config.get("panels", {}):
-        await interaction.response.send_message(
-            f"❌ Panel `{panel_id}` existiert nicht!",
-            ephemeral=True
-        )
-        return
-
-    target_channel = channel or interaction.channel
-    panel = server_config["panels"][panel_id]
-
-    panel_embed = discord.Embed(
-        title=f"{panel.get('emoji', '🎫')} {panel['label']}",
-        description=panel.get("description", "Klicke auf den Button unten, um ein Ticket zu erstellen."),
-        color=get_color(interaction.guild.id, "default")
-    )
-    panel_embed.set_footer(text="© Custom Tickets by Custom Discord Development")
-
-    await target_channel.send(embed=panel_embed, view=TicketLauncherView(interaction.guild.id, [panel_id]))
-    await interaction.response.send_message(
-        f"✅ Panel **{panel['label']}** wurde in {target_channel.mention} gesendet!",
-        ephemeral=True
-    )
-
-@bot.tree.command(name="multipanel_create", description="📋 Erstellt ein neues Multipanel")
-@check_permission("multipanel_create")
-@app_commands.describe(multipanel_id="Eindeutige ID für das Multipanel")
-async def multipanel_create(interaction: discord.Interaction, multipanel_id: str):
-    """Erstellt ein Multipanel."""
-    server_config = get_server_config(interaction.guild.id)
-    multipanel_key = multipanel_id.lower().replace(" ", "_")
-
-    if multipanel_key in server_config.get("multipanels", {}):
-        await interaction.response.send_message(
-            f"❌ Multipanel `{multipanel_key}` existiert bereits!",
-            ephemeral=True
-        )
-        return
-
-    if not server_config.get("panels"):
-        await interaction.response.send_message(
-            "❌ Es sind noch keine Panels vorhanden! Erstelle zuerst Panels mit `/panel_create`.",
-            ephemeral=True
-        )
-        return
-
-    await interaction.response.send_message(
-        f"🎨 **Erstelle Multipanel: {multipanel_key}**\n\nWähle die Panels aus, die in diesem Multipanel enthalten sein sollen:",
-        view=PanelSelectView(multipanel_key, interaction.guild.id),
-        ephemeral=True
-    )
-
-@bot.tree.command(name="multipanel_list", description="📋 Zeigt alle Multipanels")
-@check_permission("multipanel_list")
-async def multipanel_list(interaction: discord.Interaction):
-    """Listet alle Multipanels."""
-    server_config = get_server_config(interaction.guild.id)
-    multipanels = server_config.get("multipanels", {})
-
-    if not multipanels:
-        await interaction.response.send_message(
-            "❌ Es sind noch keine Multipanels konfiguriert!",
-            ephemeral=True
-        )
-        return
-
-    list_embed = discord.Embed(
-        title="📋 Konfigurierte Multipanels",
-        color=get_color(interaction.guild.id, "info")
-    )
-
-    for key, data in multipanels.items():
-        panel_names = [server_config["panels"][p]["label"] for p in data["panels"] if p in server_config.get("panels", {})]
-        value = f"**Panels:** {', '.join(panel_names)}\n"
-        value += f"**Erstellt von:** <@{data.get('created_by', 0)}>"
-
-        list_embed.add_field(name=f"📦 {key}", value=value, inline=False)
-
-    await interaction.response.send_message(embed=list_embed, ephemeral=True)
-
-@bot.tree.command(name="multipanel_delete", description="🗑️ Löscht ein Multipanel")
-@check_permission("multipanel_delete")
-@app_commands.describe(multipanel_id="Die ID des Multipanels")
-async def multipanel_delete(interaction: discord.Interaction, multipanel_id: str):
-    """Löscht ein Multipanel."""
-    server_config = get_server_config(interaction.guild.id)
-
-    if multipanel_id not in server_config.get("multipanels", {}):
-        await interaction.response.send_message(
-            f"❌ Multipanel `{multipanel_id}` existiert nicht!",
-            ephemeral=True
-        )
-        return
-
-    del server_config["multipanels"][multipanel_id]
-    save_config(config)
-
-    await interaction.response.send_message(
-        f"✅ Multipanel **{multipanel_id}** wurde gelöscht!",
-        ephemeral=True
-    )
-
-@bot.tree.command(name="panel_create", description="➕ Erstellt ein neues Ticket-Panel")
-@check_permission("panel_create")
-async def panel_create(interaction: discord.Interaction):
-    """Öffnet das Modal zum Erstellen eines Panels."""
-    await interaction.response.send_modal(PanelCreateModal(interaction.guild.id))
-
-@bot.tree.command(name="panel_delete", description="🗑️ Löscht ein Ticket-Panel")
-@check_permission("panel_delete")
-@app_commands.describe(panel_id="Die ID des Panels")
-async def panel_delete(interaction: discord.Interaction, panel_id: str):
-    """Löscht ein Panel."""
-    server_config = get_server_config(interaction.guild.id)
-
-    if panel_id not in server_config.get("panels", {}):
-        await interaction.response.send_message(
-            f"❌ Panel `{panel_id}` existiert nicht!",
-            ephemeral=True
-        )
-        return
-
-    panel_data = server_config["panels"][panel_id]
-    del server_config["panels"][panel_id]
-    save_config(config)
-
-    delete_embed = discord.Embed(
-        title="🗑️ Panel gelöscht",
-        description=f"Das Panel **{panel_data.get('label', panel_id)}** wurde erfolgreich gelöscht.",
-        color=get_color(interaction.guild.id, "error")
-    )
-
-    await interaction.response.send_message(embed=delete_embed, ephemeral=True)
-
-@bot.tree.command(name="panel_list", description="📋 Zeigt alle konfigurierten Panels")
-@check_permission("panel_list")
-async def panel_list(interaction: discord.Interaction):
-    """Listet alle Panels auf."""
-    server_config = get_server_config(interaction.guild.id)
-    panels = server_config.get("panels", {})
-
-    if not panels:
-        await interaction.response.send_message(
-            "❌ Es sind noch keine Panels konfiguriert!",
-            ephemeral=True
-        )
-        return
-
-    list_embed = discord.Embed(
-        title="📋 Konfigurierte Panels",
-        color=get_color(interaction.guild.id, "info")
-    )
-
-    for key, panel in panels.items():
-        status = "✅ Aktiv" if panel.get("enabled", True) else "❌ Deaktiviert"
-        value = f"**Label:** {panel.get('label', key)}\n"
-        value += f"**Emoji:** {panel.get('emoji', '🎫')}\n"
-        value += f"**Kategorie:** <#{panel.get('category_id', 0)}>\n"
-        value += f"**Staff Rolle:** <@&{panel.get('staff_role_id', 0)}>\n"
-        value += f"**Status:** {status}"
-
-        list_embed.add_field(name=f"🎫 {key}", value=value, inline=True)
-
-    await interaction.response.send_message(embed=list_embed, ephemeral=True)
-
-@bot.tree.command(name="config_set", description="⚙️ Setzt Bot-Konfigurationen")
-@check_permission("config_set")
-@app_commands.describe(
-    setting="Die Einstellung die geändert werden soll",
-    value="Der neue Wert"
-)
-@app_commands.choices(setting=[
-    app_commands.Choice(name="Log Kanal ID", value="log_channel_id"),
-    app_commands.Choice(name="Staff Rollen ID", value="staff_role_id"),
-    app_commands.Choice(name="AI Training Kanal ID", value="ai_training_channel_id"),
-    app_commands.Choice(name="Embed Farbe: Default", value="color_default"),
-    app_commands.Choice(name="Embed Farbe: Success", value="color_success"),
-    app_commands.Choice(name="Embed Farbe: Error", value="color_error"),
-    app_commands.Choice(name="Embed Farbe: Warning", value="color_warning"),
-    app_commands.Choice(name="Embed Farbe: Info", value="color_info"),
-])
-async def config_set(interaction: discord.Interaction, setting: str, value: str):
-    """Setzt Konfigurationswerte."""
-    server_config = get_server_config(interaction.guild.id)
-
-    try:
-        if setting.startswith("color_"):
-            color_key = setting.replace("color_", "")
-            if value.startswith("#"):
-                value = value[1:]
-            color_int = int(value, 16)
-
-            if "embed_colors" not in server_config:
-                server_config["embed_colors"] = {}
-            server_config["embed_colors"][color_key] = color_int
-
-            success_msg = f"✅ Farbe **{color_key}** wurde auf `#{value}` gesetzt."
-
-        else:
-            server_config[setting] = int(value)
-            success_msg = f"✅ **{setting}** wurde auf `{value}` gesetzt."
-
-        save_config(config)
-
-        embed = discord.Embed(
-            description=success_msg,
-            color=get_color(interaction.guild.id, "success")
-        )
-        await interaction.response.send_message(embed=embed, ephemeral=True)
-
-    except ValueError:
-        await interaction.response.send_message(
-            f"❌ Ungültiger Wert!",
-            ephemeral=True
-        )
-
-@bot.tree.command(name="config_show", description="📊 Zeigt die aktuelle Konfiguration")
-@check_permission("config_show")
-async def config_show(interaction: discord.Interaction):
-    """Zeigt die aktuelle Konfiguration."""
-    server_config = get_server_config(interaction.guild.id)
-    guild_id_str = str(interaction.guild.id)
-
-    embed = discord.Embed(
-        title="⚙️ Bot Konfiguration",
-        color=get_color(interaction.guild.id, "info")
-    )
-
-    log_channel = interaction.guild.get_channel(server_config.get("log_channel_id", 0))
-    staff_role = interaction.guild.get_role(server_config.get("staff_role_id", 0))
-    ai_channel = interaction.guild.get_channel(server_config.get("ai_training_channel_id", 0))
-
-    base_config = f"**Log Kanal:** {log_channel.mention if log_channel else '`Nicht gesetzt`'}\n"
-    base_config += f"**Staff Rolle:** {staff_role.mention if staff_role else '`Nicht gesetzt`'}\n"
-    base_config += f"**AI Training Kanal:** {ai_channel.mention if ai_channel else '`Nicht gesetzt`'}\n"
-    base_config += f"**Panels:** {len(server_config.get('panels', {}))}\n"
-    base_config += f"**Multipanels:** {len(server_config.get('multipanels', {}))}\n"
-
-    ai_keywords = 0
-    if guild_id_str in ai_training.get("servers", {}):
-        ai_keywords = len(ai_training["servers"][guild_id_str].get("keywords", {}))
-    base_config += f"**AI Keywords:** {ai_keywords}\n"
-    base_config += f"**Ticket Counter:** {server_config.get('ticket_counter', 0)}"
-
-    embed.add_field(name="🔧 Basis-Konfiguration", value=base_config, inline=False)
-
-    colors = server_config.get("embed_colors", {})
-    color_text = ""
-    for key, value in colors.items():
-        color_text += f"**{key.capitalize()}:** `#{value:06x}`\n"
-
-    if color_text:
-        embed.add_field(name="🎨 Embed-Farben", value=color_text, inline=False)
-
-    await interaction.response.send_message(embed=embed, ephemeral=True)
-
-@bot.tree.command(name="ai_keywords", description="🤖 Zeigt alle trainierten AI Keywords")
-@check_permission("ai_keywords")
-async def ai_keywords_cmd(interaction: discord.Interaction):
-    """Zeigt AI Keywords."""
-    guild_id_str = str(interaction.guild.id)
-    keywords = {}
-
-    if guild_id_str in ai_training.get("servers", {}):
-        keywords = ai_training["servers"][guild_id_str].get("keywords", {})
-
-    if not keywords:
-        await interaction.response.send_message(
-            "❌ Es sind noch keine Keywords trainiert!",
-            ephemeral=True
-        )
-        return
-
-    embed = discord.Embed(
-        title="🤖 Trainierte AI Keywords",
-        color=get_color(interaction.guild.id, "info")
-    )
-
-    for keyword, response in list(keywords.items())[:25]:
-        embed.add_field(
-            name=f"🔑 {keyword}",
-            value=response[:100] + "..." if len(response) > 100 else response,
-            inline=False
-        )
-
-    await interaction.response.send_message(embed=embed, ephemeral=True)
-
-@bot.tree.command(name="permission_grant", description="🔑 Erteilt einem User Berechtigungen für Commands")
-@app_commands.checks.has_permissions(administrator=True)
-@app_commands.describe(
-    user="Der User dem Berechtigungen erteilt werden",
-    command="Der Command (oder * für alle)",
-)
-async def permission_grant(interaction: discord.Interaction, user: discord.Member, command: str):
-    """Erteilt Berechtigungen."""
-    guild_id_str = str(interaction.guild.id)
-    user_id_str = str(user.id)
-
-    if guild_id_str not in permissions["servers"]:
-        permissions["servers"][guild_id_str] = {"users": {}}
-
-    if "users" not in permissions["servers"][guild_id_str]:
-        permissions["servers"][guild_id_str]["users"] = {}
-
-    if user_id_str not in permissions["servers"][guild_id_str]["users"]:
-        permissions["servers"][guild_id_str]["users"][user_id_str] = []
-
-    if command not in permissions["servers"][guild_id_str]["users"][user_id_str]:
-        permissions["servers"][guild_id_str]["users"][user_id_str].append(command)
-        save_permissions(permissions)
-
-        embed = discord.Embed(
-            title="✅ Berechtigung erteilt",
-            description=f"{user.mention} hat nun Zugriff auf den Command **{command}**",
-            color=get_color(interaction.guild.id, "success")
-        )
-        await interaction.response.send_message(embed=embed, ephemeral=True)
-    else:
-        await interaction.response.send_message(
-            f"❌ {user.mention} hat bereits Zugriff auf **{command}**!",
-            ephemeral=True
-        )
-
-@bot.tree.command(name="permission_revoke", description="🔒 Entzieht einem User Berechtigungen")
-@app_commands.checks.has_permissions(administrator=True)
-@app_commands.describe(
-    user="Der User dem Berechtigungen entzogen werden",
-    command="Der Command (oder * für alle)",
-)
-async def permission_revoke(interaction: discord.Interaction, user: discord.Member, command: str):
-    """Entzieht Berechtigungen."""
-    guild_id_str = str(interaction.guild.id)
-    user_id_str = str(user.id)
-
-    if (guild_id_str not in permissions["servers"] or 
-        user_id_str not in permissions["servers"][guild_id_str].get("users", {})):
-        await interaction.response.send_message(
-            f"❌ {user.mention} hat keine Berechtigungen!",
-            ephemeral=True
-        )
-        return
-
-    if command in permissions["servers"][guild_id_str]["users"][user_id_str]:
-        permissions["servers"][guild_id_str]["users"][user_id_str].remove(command)
-        save_permissions(permissions)
-
-        embed = discord.Embed(
-            title="✅ Berechtigung entzogen",
-            description=f"{user.mention} hat keinen Zugriff mehr auf **{command}**",
-            color=get_color(interaction.guild.id, "success")
-        )
-        await interaction.response.send_message(embed=embed, ephemeral=True)
-    else:
-        await interaction.response.send_message(
-            f"❌ {user.mention} hat keinen Zugriff auf **{command}**!",
-            ephemeral=True
-        )
-
-@bot.tree.command(name="permission_list", description="📋 Zeigt alle Berechtigungen")
-@app_commands.checks.has_permissions(administrator=True)
-async def permission_list(interaction: discord.Interaction):
-    """Listet alle Berechtigungen auf."""
-    guild_id_str = str(interaction.guild.id)
-
-    if guild_id_str not in permissions["servers"] or not permissions["servers"][guild_id_str].get("users"):
-        await interaction.response.send_message(
-            "❌ Es sind noch keine Berechtigungen konfiguriert!",
-            ephemeral=True
-        )
-        return
-
-    embed = discord.Embed(
-        title="📋 Berechtigungen",
-        color=get_color(interaction.guild.id, "info")
-    )
-
-    for user_id, commands in permissions["servers"][guild_id_str]["users"].items():
-        if commands:
-            embed.add_field(
-                name=f"👤 <@{user_id}>",
-                value=", ".join([f"`{cmd}`" for cmd in commands]),
-                inline=False
-            )
-
-    await interaction.response.send_message(embed=embed, ephemeral=True)
-
-# --- Bot Events ---
+            logger.error(f"Fehler beim Senden an Log-Channel: {e}")
+
+def add_log_entry(action, user_id, details):
+    """Fügt einen Log-Eintrag hinzu"""
+    log_entry = {
+        "timestamp": datetime.now().isoformat(),
+        "action": action,
+        "user_id": user_id,
+        "details": details
+    }
+    data['logs'].append(log_entry)
+    save_data(data)
+    logger.info(f"Log erstellt: {action} von User {user_id}")
+
+data = load_data()
+
+# Versicherungstypen mit Preisen und zugehörigen Rollen
+INSURANCE_TYPES = {
+    "Krankenversicherung (Gesetzlich)": {"price": 3000.00, "role": "Krankenversicherung"},
+    "Krankenversicherung (Privat)": {"price": 5000.00, "role": "Krankenversicherung"},
+    "Haftpflichtversicherung": {"price": 3000.00, "role": "Haftpflichtversicherung"},
+    "Hausratversicherung": {"price": 10000.00, "role": "Hausratversicherung"},
+    "Kfz-Versicherung": {"price": 3000.00, "role": "Kfz-Versicherung"},
+    "Rechtsschutzversicherung": {"price": 3000.00, "role": "Rechtsschutzversicherung"},
+    "Unfallversicherung": {"price": 220.00, "role": "Unfallversicherung"},
+    "Berufsunfähigkeitsversicherung": {"price": 6000.00, "role": "Berufsunfähigkeitsversicherung"}
+}
+
+# Farbschema
+COLOR_PRIMARY = 0x2C3E50
+COLOR_SUCCESS = 0x27AE60
+COLOR_WARNING = 0xE67E22
+COLOR_ERROR = 0xC0392B
+COLOR_INFO = 0x3498DB
 
 @bot.event
 async def on_ready():
-    """Bot ist bereit."""
-    print("═" * 50)
-    print(f"✅ Bot ist online: {bot.user.name}")
-    print(f"📊 Discord.py Version: {discord.__version__}")
-    print(f"🔗 Verbunden mit {len(bot.guilds)} Server(n)")
-
-    # Initialisiere alle Server
-    for guild in bot.guilds:
-        get_server_config(guild.id)
-        print(f"   ├─ {guild.name} (ID: {guild.id})")
-
-    total_panels = sum(len(server.get("panels", {})) for server in config.get("servers", {}).values())
-    total_multipanels = sum(len(server.get("multipanels", {})) for server in config.get("servers", {}).values())
-    total_keywords = sum(len(server.get("keywords", {})) for server in ai_training.get("servers", {}).values())
-
-    print(f"🎫 {total_panels} Panels geladen (alle Server)")
-    print(f"📦 {total_multipanels} Multipanels geladen (alle Server)")
-    print(f"🤖 {total_keywords} AI Keywords trainiert (alle Server)")
-    print("═" * 50)
-
+    logger.info(f'{bot.user} erfolgreich gestartet')
     try:
         synced = await bot.tree.sync()
-        print(f"✅ {len(synced)} Slash Commands synchronisiert")
-        print("═" * 50)
+        logger.info(f'{len(synced)} Slash Commands synchronisiert')
+        check_invoices.start()  # Mahnung-System starten
     except Exception as e:
-        print(f"❌ Fehler beim Synchronisieren: {e}")
+        logger.error(f'Fehler beim Synchronisieren der Commands: {e}')
 
-@bot.event
-async def on_guild_join(guild: discord.Guild):
-    """Bot tritt einem neuen Server bei."""
-    print(f"✅ Bot ist neuem Server beigetreten: {guild.name} (ID: {guild.id})")
-    get_server_config(guild.id)
-    print(f"   └─ Konfiguration erstellt für {guild.name}")
-
-@bot.event
-async def on_guild_remove(guild: discord.Guild):
-    """Bot wird von einem Server entfernt."""
-    print(f"⚠️ Bot wurde von Server entfernt: {guild.name} (ID: {guild.id})")
-    print(f"   └─ Konfiguration bleibt erhalten für späteren Beitritt")
-
-# --- Error Handlers ---
-
-@ticket_setup.error
-@panel_create.error
-@panel_delete.error
-@panel_list.error
-@panel_send.error
-@multipanel_create.error
-@multipanel_list.error
-@multipanel_delete.error
-@config_set.error
-@config_show.error
-@ai_keywords_cmd.error
-@permission_grant.error
-@permission_revoke.error
-@permission_list.error
-async def command_error(interaction: discord.Interaction, error: app_commands.AppCommandError):
-    """Fehlerbehandlung für Commands."""
-    if isinstance(error, app_commands.MissingPermissions):
-        await interaction.response.send_message(
-            "❌ Du hast keine Berechtigung diesen Command zu nutzen!",
-            ephemeral=True
+# Log-Channel einrichten
+@bot.tree.command(name="log_channel_setzen", description="Setzt den Channel für System-Logs")
+@app_commands.describe(channel="Der Channel für Log-Nachrichten")
+async def set_log_channel(interaction: discord.Interaction, channel: discord.TextChannel):
+    if not interaction.user.guild_permissions.administrator:
+        error_embed = discord.Embed(
+            title="Zugriff verweigert",
+            description="Nur Administratoren können den Log-Channel festlegen.",
+            color=COLOR_ERROR
         )
-    elif isinstance(error, app_commands.CheckFailure):
-        await interaction.response.send_message(
-            "❌ Du hast keine Berechtigung diesen Command zu nutzen!",
-            ephemeral=True
+        await interaction.response.send_message(embed=error_embed, ephemeral=True)
+        return
+
+    config["log_channel_id"] = channel.id
+    save_config(config)
+
+    success_embed = discord.Embed(
+        title="Log-Channel konfiguriert",
+        description=f"Alle System-Logs werden nun in {channel.mention} gesendet.",
+        color=COLOR_SUCCESS
+    )
+    await interaction.response.send_message(embed=success_embed, ephemeral=True)
+
+    # Log
+    log_embed = discord.Embed(
+        title="⚙️ System-Konfiguration",
+        description="Der Log-Channel wurde erfolgreich konfiguriert.",
+        color=COLOR_INFO,
+        timestamp=datetime.now()
+    )
+    log_embed.add_field(name="Aktion", value="Log-Channel festgelegt", inline=False)
+    log_embed.add_field(name="Neuer Log-Channel", value=channel.mention, inline=True)
+    log_embed.add_field(name="Konfiguriert von", value=interaction.user.mention, inline=True)
+    log_embed.add_field(name="Zeitstempel", value=datetime.now().strftime('%d.%m.%Y, %H:%M:%S Uhr'), inline=True)
+    log_embed.set_footer(text=f"User-ID: {interaction.user.id}")
+    await send_to_log_channel(interaction.guild, log_embed)
+
+    logger.info(f"Log-Channel auf {channel.id} gesetzt von User {interaction.user.id}")
+
+# Firmenkonto setzen
+@bot.tree.command(name="firmenkonto_setzen", description="Setzt das Firmenkonto für Economy-Zahlungen")
+@app_commands.describe(user="Der User des Firmenkontos")
+async def set_company_account(interaction: discord.Interaction, user: discord.User):
+    if not interaction.user.guild_permissions.administrator:
+        error_embed = discord.Embed(
+            title="Zugriff verweigert",
+            description="Nur Administratoren können das Firmenkonto festlegen.",
+            color=COLOR_ERROR
         )
-    else:
-        await interaction.response.send_message(
-            f"❌ Ein Fehler ist aufgetreten: {str(error)}",
-            ephemeral=True
+        await interaction.response.send_message(embed=error_embed, ephemeral=True)
+        return
+
+    config["company_account_id"] = user.id
+    save_config(config)
+
+    success_embed = discord.Embed(
+        title="Firmenkonto konfiguriert",
+        description=f"Das Firmenkonto wurde auf {user.mention} gesetzt.",
+        color=COLOR_SUCCESS
+    )
+    await interaction.response.send_message(embed=success_embed, ephemeral=True)
+
+    # Log
+    log_embed = discord.Embed(
+        title="⚙️ System-Konfiguration",
+        description="Das Firmenkonto wurde erfolgreich konfiguriert.",
+        color=COLOR_INFO,
+        timestamp=datetime.now()
+    )
+    log_embed.add_field(name="Aktion", value="Firmenkonto festgelegt", inline=False)
+    log_embed.add_field(name="Neues Firmenkonto", value=f"{user.mention}\n`{user.id}`", inline=True)
+    log_embed.add_field(name="Konfiguriert von", value=interaction.user.mention, inline=True)
+    log_embed.add_field(name="Zeitstempel", value=datetime.now().strftime('%d.%m.%Y, %H:%M:%S Uhr'), inline=True)
+    log_embed.set_footer(text=f"User-ID: {interaction.user.id}")
+    await send_to_log_channel(interaction.guild, log_embed)
+
+# Auswahlmenü für Versicherungen
+class InsuranceSelect(discord.ui.Select):
+    def __init__(self):
+        options = [
+            discord.SelectOption(
+                label=insurance,
+                description=f"Monatsbeitrag: {data['price']:,.2f} €",
+                value=insurance
+            )
+            for insurance, data in INSURANCE_TYPES.items()
+        ]
+        super().__init__(
+            placeholder="Wählen Sie die gewünschten Versicherungen aus...",
+            min_values=1,
+            max_values=len(options),
+            options=options,
+            custom_id="insurance_select"
         )
 
-# --- Bot Start ---
+    async def callback(self, interaction: discord.Interaction):
+        view = self.view
+        for item in view.children:
+            if isinstance(item, discord.ui.Button):
+                item.disabled = False
 
-if __name__ == "__main__":
-    bot_token = os.environ.get("DISCORD_BOT_TOKEN")
+        total = sum(INSURANCE_TYPES[ins]["price"] for ins in self.values)
+        preview_text = "\n".join(f"▸ {ins} — {INSURANCE_TYPES[ins]['price']:,.2f} €" for ins in self.values)
 
-    if not bot_token or bot_token == "DEIN_BOT_TOKEN_HIER":
-        print("❌ FEHLER: Bitte überprüfe die Umgebungsvariable DISCORD_BOT_TOKEN!")
-        print("Für Render: Setze DISCORD_BOT_TOKEN als Environment Variable")
-        print("═" * 50)
-        exit(1)
+        preview_embed = discord.Embed(
+            title="Versicherungen ausgewählt",
+            description=f"**Ausgewählte Versicherungen:**\n{preview_text}\n\n**Gesamtbeitrag (monatlich):** {total:,.2f} €",
+            color=COLOR_INFO
+        )
+        preview_embed.set_footer(text="Klicken Sie auf 'Kundenakte erstellen', um fortzufahren.")
+
+        await interaction.response.edit_message(embed=preview_embed, view=view)
+
+class InsuranceView(discord.ui.View):
+    def __init__(self):
+        super().__init__(timeout=180)
+        self.selected_insurances = []
+        self.confirmed = False
+        self.add_item(InsuranceSelect())
+
+        confirm_button = discord.ui.Button(
+            label="Kundenakte erstellen",
+            style=discord.ButtonStyle.green,
+            custom_id="confirm_insurance",
+            disabled=True
+        )
+        confirm_button.callback = self.confirm_callback
+        self.add_item(confirm_button)
+
+    async def confirm_callback(self, interaction: discord.Interaction):
+        self.confirmed = True
+        await interaction.response.defer()
+        self.stop()
+
+    async def on_timeout(self):
+        for item in self.children:
+            item.disabled = True
+
+# Kundenakte erstellen
+@bot.tree.command(name="kundenakte_erstellen", description="Erstellt eine neue Kundenakte im Archiv")
+@app_commands.describe(
+    forum_channel="Forum-Channel für Kundenakten",
+    rp_name="RP-Name des Versicherungsnehmers",
+    hbpay_nummer="HBpay Kontonummer",
+    economy_id="Economy-ID des Versicherungsnehmers"
+)
+async def create_customer(
+    interaction: discord.Interaction,
+    forum_channel: discord.ForumChannel,
+    rp_name: str,
+    hbpay_nummer: str,
+    economy_id: str
+):
+    view = InsuranceView()
+
+    select_embed = discord.Embed(
+        title="Versicherungen auswählen",
+        description="Bitte wählen Sie die gewünschten Versicherungen für den Versicherungsnehmer aus dem Dropdown-Menü aus.\n\nNach der Auswahl klicken Sie auf den Button **'Kundenakte erstellen'**, um fortzufahren.",
+        color=COLOR_INFO
+    )
+
+    await interaction.response.send_message(embed=select_embed, view=view, ephemeral=True)
+    await view.wait()
+
+    if not view.confirmed:
+        timeout_embed = discord.Embed(
+            title="Zeitüberschreitung",
+            description="Die Auswahl wurde nicht rechtzeitig bestätigt. Bitte versuchen Sie es erneut.",
+            color=COLOR_WARNING
+        )
+        await interaction.edit_original_response(embed=timeout_embed, view=None)
+        return
+
+    insurance_select = view.children[0]
+    if not insurance_select.values:
+        error_embed = discord.Embed(
+            title="Keine Auswahl getroffen",
+            description="Es wurden keine Versicherungen ausgewählt.",
+            color=COLOR_ERROR
+        )
+        await interaction.edit_original_response(embed=error_embed, view=None)
+        return
+
+    insurance_list = insurance_select.values
+
+    logger.info(f"Kundenakte wird erstellt von User {interaction.user.id} für {rp_name}")
 
     try:
-        # Port für Render (Web-Service benötigt einen Port)
-        port = int(os.environ.get("PORT", 8080))
-        print(f"🌐 Port: {port} (für Render Web Service)")
+        customer_id = generate_customer_id()
+        total_price = sum(INSURANCE_TYPES[ins]["price"] for ins in insurance_list)
 
-        bot.run(bot_token)
-    except discord.errors.LoginFailure:
-        print("❌ FEHLER: Ungültiger Bot-Token!")
+        embed = discord.Embed(
+            title="Versicherungsakte",
+            color=COLOR_PRIMARY,
+            timestamp=datetime.now()
+        )
+        embed.add_field(name="Versicherungsnehmer-ID", value=f"`{customer_id}`", inline=True)
+        embed.add_field(name="Versicherungsnehmer", value=rp_name, inline=True)
+        embed.add_field(name="‎", value="‎", inline=True)
+        embed.add_field(name="HBpay Kontonummer", value=f"`{hbpay_nummer}`", inline=True)
+        embed.add_field(name="Economy-ID", value=f"`{economy_id}`", inline=True)
+        embed.add_field(name="‎", value="‎", inline=True)
+
+        insurance_text = "\n".join(
+            f"▸ {ins} — `{INSURANCE_TYPES[ins]['price']:,.2f} €/Monat`" 
+            for ins in insurance_list
+        )
+        embed.add_field(name="Abgeschlossene Versicherungen", value=insurance_text, inline=False)
+        embed.add_field(name="Gesamtbeitrag (monatlich)", value=f"**{total_price:,.2f} €**", inline=False)
+
+        embed.add_field(name="‎", value="─────────────────────────────", inline=False)
+        embed.add_field(
+            name="Aktenanlage",
+            value=f"Bearbeitet von: {interaction.user.mention}\nDatum: {datetime.now().strftime('%d.%m.%Y, %H:%M')} Uhr",
+            inline=False
+        )
+
+        thread = await forum_channel.create_thread(
+            name=f"Akte {customer_id} | {rp_name}",
+            content="**Versicherungsakte**",
+            embed=embed
+        )
+
+        data['customers'][customer_id] = {
+            "rp_name": rp_name,
+            "hbpay_nummer": hbpay_nummer,
+            "economy_id": economy_id,
+            "versicherungen": insurance_list,
+            "total_monthly_price": total_price,
+            "thread_id": thread.thread.id,
+            "discord_user_id": interaction.user.id,
+            "created_at": datetime.now().isoformat(),
+            "created_by": interaction.user.id
+        }
+        save_data(data)
+
+        member = interaction.guild.get_member(interaction.user.id)
+        assigned_roles = []
+        for insurance in insurance_list:
+            role_name = INSURANCE_TYPES[insurance]["role"]
+            role = discord.utils.get(interaction.guild.roles, name=role_name)
+            if not role:
+                role = await interaction.guild.create_role(
+                    name=role_name,
+                    color=discord.Color.from_rgb(44, 62, 80)
+                )
+                logger.info(f"Rolle erstellt: {role_name}")
+            await member.add_roles(role)
+            assigned_roles.append(role_name)
+
+        add_log_entry(
+            "KUNDENAKTE_ERSTELLT",
+            interaction.user.id,
+            {
+                "customer_id": customer_id,
+                "rp_name": rp_name,
+                "versicherungen": insurance_list,
+                "total_price": total_price
+            }
+        )
+
+        log_embed = discord.Embed(
+            title="📋 Neue Kundenakte erstellt",
+            color=COLOR_SUCCESS,
+            timestamp=datetime.now()
+        )
+        log_embed.add_field(name="Versicherungsnehmer-ID", value=f"`{customer_id}`", inline=True)
+        log_embed.add_field(name="Name", value=rp_name, inline=True)
+        log_embed.add_field(name="Bearbeiter", value=interaction.user.mention, inline=True)
+        log_embed.add_field(name="Versicherungen", value=str(len(insurance_list)), inline=True)
+        log_embed.add_field(name="Monatsbeitrag", value=f"{total_price:,.2f} €", inline=True)
+        await send_to_log_channel(interaction.guild, log_embed)
+
+        success_embed = discord.Embed(
+            title="Kundenakte erfolgreich angelegt",
+            description="Die Versicherungsakte wurde erfolgreich im System hinterlegt.",
+            color=COLOR_SUCCESS
+        )
+        success_embed.add_field(name="Versicherungsnehmer-ID", value=f"`{customer_id}`", inline=True)
+        success_embed.add_field(name="Aktenarchiv", value=thread.thread.mention, inline=True)
+        success_embed.add_field(name="Monatsbeitrag", value=f"{total_price:,.2f} €", inline=True)
+
+        await interaction.edit_original_response(embed=success_embed, view=None)
+        logger.info(f"Kundenakte {customer_id} erfolgreich erstellt")
+
     except Exception as e:
-        print(f"❌ Kritischer Fehler: {e}")
+        logger.error(f"Fehler beim Erstellen der Kundenakte: {e}", exc_info=True)
+        error_embed = discord.Embed(
+            title="Fehler bei der Aktenanlage",
+            description=f"Es ist ein Fehler aufgetreten: {str(e)}",
+            color=COLOR_ERROR
+        )
+        try:
+            await interaction.edit_original_response(embed=error_embed, view=None)
+        except:
+            await interaction.followup.send(embed=error_embed, ephemeral=True)
+
+# Rechnung OHNE Zahlungsbuttons erstellen
+@bot.tree.command(name="rechnung_ausstellen", description="Erstellt eine Versicherungsrechnung")
+@app_commands.describe(
+    customer_id="Versicherungsnehmer-ID",
+    channel="Channel für die Rechnungsstellung"
+)
+async def create_invoice(
+    interaction: discord.Interaction,
+    customer_id: str,
+    channel: discord.TextChannel
+):
+    await interaction.response.defer(ephemeral=True)
+    logger.info(f"Rechnung wird erstellt von User {interaction.user.id} für Kunde {customer_id}")
+
+    try:
+        if customer_id not in data['customers']:
+            error_embed = discord.Embed(
+                title="Kunde nicht gefunden",
+                description=f"Es existiert keine Akte mit der Versicherungsnehmer-ID `{customer_id}`.",
+                color=COLOR_ERROR
+            )
+            await interaction.followup.send(embed=error_embed, ephemeral=True)
+            return
+
+        customer = data['customers'][customer_id]
+        invoice_id = generate_invoice_id()
+        betrag_netto = customer['total_monthly_price']
+
+        # 13% Steuer
+        steuer = betrag_netto * 0.13
+        betrag_brutto = betrag_netto + steuer
+
+        # Zahlungsfrist: 3 Tage
+        due_date = datetime.now() + timedelta(days=3)
+
+        embed = discord.Embed(
+            title="Versicherungsrechnung",
+            color=COLOR_PRIMARY,
+            timestamp=datetime.now()
+        )
+        embed.add_field(name="Rechnungsnummer", value=f"`{invoice_id}`", inline=True)
+        embed.add_field(name="Rechnungsdatum", value=datetime.now().strftime('%d.%m.%Y'), inline=True)
+        embed.add_field(name="Fälligkeitsdatum", value=due_date.strftime('%d.%m.%Y'), inline=True)
+
+        embed.add_field(name="‎", value="**Versicherungsnehmer**", inline=False)
+        embed.add_field(name="Name", value=customer['rp_name'], inline=True)
+        embed.add_field(name="Kunden-ID", value=f"`{customer_id}`", inline=True)
+        embed.add_field(name="‎", value="‎", inline=True)
+
+        embed.add_field(name="‎", value="**Zahlungsinformationen**", inline=False)
+        embed.add_field(name="HBpay Nummer", value=f"`{customer['hbpay_nummer']}`", inline=True)
+        embed.add_field(name="Economy-ID", value=f"`{customer['economy_id']}`", inline=True)
+        embed.add_field(name="‎", value="‎", inline=True)
+
+        insurance_details = "\n".join(
+            f"▸ {ins}\n   `{INSURANCE_TYPES[ins]['price']:,.2f} €`" 
+            for ins in customer['versicherungen']
+        )
+        embed.add_field(name="Versicherte Positionen", value=insurance_details, inline=False)
+
+        embed.add_field(name="‎", value="─────────────────────────────", inline=False)
+        embed.add_field(name="Zwischensumme (Netto)", value=f"{betrag_netto:,.2f} €", inline=True)
+        embed.add_field(name="Steuer (13%)", value=f"{steuer:,.2f} €", inline=True)
+        embed.add_field(name="**Rechnungsbetrag (Brutto)**", value=f"**{betrag_brutto:,.2f} €**", inline=True)
+
+        embed.add_field(name="‎", value="─────────────────────────────", inline=False)
+        embed.add_field(name="Status", value="⏳ Zahlung ausstehend", inline=False)
+        embed.set_footer(text=f"Ausgestellt von {interaction.user.display_name}")
+
+        # Rechnung OHNE View senden (keine Buttons)
+        message = await channel.send(embed=embed)
+
+        data['invoices'][invoice_id] = {
+            "customer_id": customer_id,
+            "betrag": betrag_brutto,
+            "betrag_netto": betrag_netto,
+            "steuer": steuer,
+            "original_betrag": betrag_brutto,
+            "paid": False,
+            "message_id": message.id,
+            "channel_id": channel.id,
+            "due_date": due_date.isoformat(),
+            "reminder_count": 0,
+            "created_at": datetime.now().isoformat(),
+            "created_by": interaction.user.id
+        }
+        save_data(data)
+
+        add_log_entry(
+            "RECHNUNG_ERSTELLT",
+            interaction.user.id,
+            {
+                "invoice_id": invoice_id,
+                "customer_id": customer_id,
+                "betrag": betrag_brutto,
+                "due_date": due_date.strftime('%d.%m.%Y')
+            }
+        )
+
+        log_embed = discord.Embed(
+            title="🧾 Neue Rechnung ausgestellt",
+            color=COLOR_INFO,
+            timestamp=datetime.now()
+        )
+        log_embed.add_field(name="Rechnungsnummer", value=f"`{invoice_id}`", inline=True)
+        log_embed.add_field(name="Kunde", value=customer['rp_name'], inline=True)
+        log_embed.add_field(name="Betrag", value=f"{betrag_brutto:,.2f} €", inline=True)
+        log_embed.add_field(name="Fällig am", value=due_date.strftime('%d.%m.%Y'), inline=True)
+        log_embed.add_field(name="Ausgestellt von", value=interaction.user.mention, inline=True)
+        await send_to_log_channel(interaction.guild, log_embed)
+
+        success_embed = discord.Embed(
+            title="Rechnung erfolgreich ausgestellt",
+            description="Die Rechnung wurde erstellt und versendet.",
+            color=COLOR_SUCCESS
+        )
+        success_embed.add_field(name="Rechnungsnummer", value=f"`{invoice_id}`", inline=True)
+        success_embed.add_field(name="Betrag (Brutto)", value=f"{betrag_brutto:,.2f} €", inline=True)
+        success_embed.add_field(name="Fällig am", value=due_date.strftime('%d.%m.%Y'), inline=True)
+
+        await interaction.followup.send(embed=success_embed, ephemeral=True)
+
+    except Exception as e:
+        logger.error(f"Fehler beim Erstellen der Rechnung: {e}", exc_info=True)
+        error_embed = discord.Embed(
+            title="Fehler bei der Rechnungsstellung",
+            description=f"Es ist ein Fehler aufgetreten: {str(e)}",
+            color=COLOR_ERROR
+        )
+        await interaction.followup.send(embed=error_embed, ephemeral=True)
+
+# Rechnung archivieren - MIT KUNDENAKTE-POST
+@bot.tree.command(name="rechnung_archivieren", description="Markiert eine Rechnung als bezahlt und archiviert sie")
+@app_commands.describe(invoice_id="Rechnungsnummer (z.B. RE-2412-A3F9)")
+async def archive_invoice(interaction: discord.Interaction, invoice_id: str):
+    await interaction.response.defer(ephemeral=True)
+    logger.info(f"Rechnung wird archiviert von User {interaction.user.id}: {invoice_id}")
+
+    try:
+        # Prüfen ob Rechnung existiert
+        if invoice_id not in data['invoices']:
+            error_embed = discord.Embed(
+                title="Rechnung nicht gefunden",
+                description=f"Es existiert keine Rechnung mit der Nummer `{invoice_id}`.",
+                color=COLOR_ERROR
+            )
+            await interaction.followup.send(embed=error_embed, ephemeral=True)
+            return
+
+        invoice = data['invoices'][invoice_id]
+
+        # Prüfen ob bereits bezahlt
+        if invoice.get('paid', False):
+            info_embed = discord.Embed(
+                title="Rechnung bereits archiviert",
+                description=f"Die Rechnung `{invoice_id}` wurde bereits als bezahlt markiert.",
+                color=COLOR_INFO
+            )
+            await interaction.followup.send(embed=info_embed, ephemeral=True)
+            return
+
+        customer_id = invoice['customer_id']
+        customer = data['customers'].get(customer_id)
+
+        if not customer:
+            error_embed = discord.Embed(
+                title="Kunde nicht gefunden",
+                description=f"Kunde `{customer_id}` konnte nicht gefunden werden.",
+                color=COLOR_ERROR
+            )
+            await interaction.followup.send(embed=error_embed, ephemeral=True)
+            return
+
+        # Rechnung als bezahlt markieren
+        data['invoices'][invoice_id]['paid'] = True
+        data['invoices'][invoice_id]['paid_by'] = interaction.user.id
+        data['invoices'][invoice_id]['paid_at'] = datetime.now().isoformat()
+        data['invoices'][invoice_id]['archived'] = True
+        data['invoices'][invoice_id]['reminder_count'] = 0
+        save_data(data)
+
+        # Log-Eintrag
+        add_log_entry(
+            "RECHNUNG_ARCHIVIERT",
+            interaction.user.id,
+            {
+                "invoice_id": invoice_id,
+                "customer_id": customer_id,
+                "betrag": invoice['betrag']
+            }
+        )
+
+        # Log in Channel senden
+        log_embed = discord.Embed(
+            title="📦 Rechnung archiviert",
+            description="Eine Rechnung wurde erfolgreich als bezahlt markiert und archiviert.",
+            color=COLOR_SUCCESS,
+            timestamp=datetime.now()
+        )
+        log_embed.add_field(name="━━━━━━━━━━━━━━━━━━━━━━━", value="**Rechnungsdetails**", inline=False)
+        log_embed.add_field(name="Rechnungsnummer", value=f"`{invoice_id}`", inline=True)
+        log_embed.add_field(name="Kunde", value=customer['rp_name'], inline=True)
+        log_embed.add_field(name="Archiviert von", value=interaction.user.mention, inline=True)
+        log_embed.add_field(name="━━━━━━━━━━━━━━━━━━━━━━━", value="**Zahlungsinformationen**", inline=False)
+        log_embed.add_field(name="Betrag (Netto)", value=f"{invoice.get('betrag_netto', 0):,.2f} €", inline=True)
+        log_embed.add_field(name="Steuer (13%)", value=f"{invoice.get('steuer', 0):,.2f} €", inline=True)
+        log_embed.add_field(name="Betrag (Brutto)", value=f"**{invoice['betrag']:,.2f} €**", inline=True)
+        log_embed.add_field(name="━━━━━━━━━━━━━━━━━━━━━━━", value="**Zusatzinformationen**", inline=False)
+        log_embed.add_field(name="Kunden-ID", value=f"`{customer_id}`", inline=True)
+        log_embed.add_field(name="Status", value="✅ Bezahlt & Archiviert", inline=True)
+        log_embed.add_field(name="Zeitstempel", value=datetime.now().strftime('%d.%m.%Y, %H:%M:%S Uhr'), inline=True)
+        log_embed.set_footer(text=f"User-ID: {interaction.user.id}")
+        await send_to_log_channel(interaction.guild, log_embed)
+
+        # Rechnung in Kundenakte posten
+        thread_id = customer.get('thread_id')
+        if thread_id:
+            try:
+                thread = interaction.guild.get_thread(thread_id)
+                if thread:
+                    archive_embed = discord.Embed(
+                        title="📦 Archivierte Rechnung",
+                        description="Diese Rechnung wurde als bezahlt markiert und archiviert.",
+                        color=COLOR_SUCCESS,
+                        timestamp=datetime.now()
+                    )
+                    archive_embed.add_field(name="Rechnungsnummer", value=f"`{invoice_id}`", inline=True)
+                    archive_embed.add_field(name="Rechnungsdatum", value=datetime.fromisoformat(invoice['created_at']).strftime('%d.%m.%Y'), inline=True)
+                    archive_embed.add_field(name="Zahlungsdatum", value=datetime.now().strftime('%d.%m.%Y'), inline=True)
+
+                    insurance_list = customer.get('versicherungen', [])
+                    insurance_text = "\n".join(f"▸ {ins}" for ins in insurance_list)
+                    archive_embed.add_field(name="Versicherte Positionen", value=insurance_text if insurance_text else "Keine", inline=False)
+
+                    archive_embed.add_field(name="‎", value="─────────────────────────────", inline=False)
+                    archive_embed.add_field(name="Nettobetrag", value=f"{invoice.get('betrag_netto', 0):,.2f} €", inline=True)
+                    archive_embed.add_field(name="Steuer (13%)", value=f"{invoice.get('steuer', 0):,.2f} €", inline=True)
+                    archive_embed.add_field(name="**Bruttobetrag**", value=f"**{invoice['betrag']:,.2f} €**", inline=True)
+
+                    archive_embed.add_field(name="‎", value="─────────────────────────────", inline=False)
+                    archive_embed.add_field(name="Status", value="✅ Bezahlt", inline=True)
+                    archive_embed.add_field(name="Archiviert von", value=interaction.user.mention, inline=True)
+                    archive_embed.set_footer(text=f"Archiviert am {datetime.now().strftime('%d.%m.%Y, %H:%M:%S')} Uhr")
+
+                    await thread.send(embed=archive_embed)
+                    logger.info(f"Rechnung {invoice_id} in Kundenakte gepostet")
+            except Exception as e:
+                logger.error(f"Fehler beim Posten in Kundenakte: {e}")
+
+        # Erfolgsbestätigung
+        success_embed = discord.Embed(
+            title="✅ Rechnung erfolgreich archiviert",
+            description=f"Die Rechnung `{invoice_id}` wurde als bezahlt markiert und archiviert.",
+            color=COLOR_SUCCESS
+        )
+        success_embed.add_field(name="Kunde", value=customer['rp_name'], inline=True)
+        success_embed.add_field(name="Betrag", value=f"{invoice['betrag']:,.2f} €", inline=True)
+        success_embed.add_field(name="Status", value="✅ Archiviert", inline=True)
+
+        await interaction.followup.send(embed=success_embed, ephemeral=True)
+        logger.info(f"Rechnung {invoice_id} erfolgreich archiviert von User {interaction.user.id}")
+
+    except Exception as e:
+        logger.error(f"Fehler beim Archivieren der Rechnung: {e}", exc_info=True)
+        error_embed = discord.Embed(
+            title="Fehler beim Archivieren",
+            description=f"Es ist ein Fehler aufgetreten: {str(e)}",
+            color=COLOR_ERROR
+        )
+        await interaction.followup.send(embed=error_embed, ephemeral=True)
+
+# Mahnungs-System
+@tasks.loop(hours=24)
+async def check_invoices():
+    """Überprüft täglich alle Rechnungen und sendet Mahnungen"""
+    try:
+        now = datetime.now()
+        for invoice_id, invoice_data in list(data['invoices'].items()):
+            if invoice_data.get('paid', False):
+                continue
+
+            due_date = datetime.fromisoformat(invoice_data['due_date'])
+            days_overdue = (now - due_date).days
+
+            if days_overdue < 0:
+                continue
+
+            reminder_count = invoice_data.get('reminder_count', 0)
+
+            # Erste Mahnung (Tag 0 nach Fälligkeit)
+            if days_overdue == 0 and reminder_count == 0:
+                await send_reminder(invoice_id, invoice_data, 1, 0)
+                data['invoices'][invoice_id]['reminder_count'] = 1
+                save_data(data)
+
+            # Zweite Mahnung (Tag 1, +5%)
+            elif days_overdue == 1 and reminder_count == 1:
+                new_amount = invoice_data['original_betrag'] * 1.05
+                data['invoices'][invoice_id]['betrag'] = new_amount
+                await send_reminder(invoice_id, invoice_data, 2, 5)
+                data['invoices'][invoice_id]['reminder_count'] = 2
+                save_data(data)
+
+            # Dritte Mahnung (Tag 2, +10% vom Original)
+            elif days_overdue == 2 and reminder_count == 2:
+                new_amount = invoice_data['original_betrag'] * 1.10
+                data['invoices'][invoice_id]['betrag'] = new_amount
+                await send_reminder(invoice_id, invoice_data, 3, 10)
+                data['invoices'][invoice_id]['reminder_count'] = 3
+                save_data(data)
+
+    except Exception as e:
+        logger.error(f"Fehler bei Mahnungsprüfung: {e}", exc_info=True)
+
+async def send_reminder(invoice_id, invoice_data, reminder_number, surcharge_percent):
+    """Sendet eine Mahnung"""
+    try:
+        for guild in bot.guilds:
+            channel = guild.get_channel(invoice_data['channel_id'])
+            if not channel:
+                continue
+
+            customer = data['customers'].get(invoice_data['customer_id'])
+            if not customer:
+                continue
+
+            customer_user = guild.get_member(customer['discord_user_id'])
+
+            surcharge_text = f" (+{surcharge_percent}% Mahngebühr)" if surcharge_percent > 0 else ""
+
+            embed = discord.Embed(
+                title=f"⚠️ {reminder_number}. Mahnung",
+                description=f"Die Rechnung `{invoice_id}` ist überfällig.",
+                color=COLOR_WARNING if reminder_number < 3 else COLOR_ERROR,
+                timestamp=datetime.now()
+            )
+            embed.add_field(name="Rechnungsnummer", value=f"`{invoice_id}`", inline=True)
+            embed.add_field(name="Kunde", value=customer['rp_name'], inline=True)
+            embed.add_field(name="Mahnung", value=f"{reminder_number}. Mahnung", inline=True)
+            embed.add_field(name="Ursprünglicher Betrag", value=f"{invoice_data['original_betrag']:,.2f} €", inline=True)
+            embed.add_field(name="Aktueller Betrag", value=f"**{invoice_data['betrag']:,.2f} €{surcharge_text}**", inline=True)
+
+            if customer_user:
+                await channel.send(f"{customer_user.mention}", embed=embed)
+            else:
+                await channel.send(embed=embed)
+
+            # Log
+            log_embed = discord.Embed(
+                title=f"📨 {reminder_number}. Mahnung versendet",
+                description="Eine Zahlungserinnerung wurde automatisch an den Kunden versendet.",
+                color=COLOR_WARNING if reminder_number < 3 else COLOR_ERROR,
+                timestamp=datetime.now()
+            )
+            log_embed.add_field(name="━━━━━━━━━━━━━━━━━━━━━━━", value="**Mahnungsdetails**", inline=False)
+            log_embed.add_field(name="Rechnungsnummer", value=f"`{invoice_id}`", inline=True)
+            log_embed.add_field(name="Kunde", value=customer['rp_name'], inline=True)
+            log_embed.add_field(name="Mahnungsstufe", value=f"{reminder_number}. Mahnung", inline=True)
+            log_embed.add_field(name="━━━━━━━━━━━━━━━━━━━━━━━", value="**Finanzielle Informationen**", inline=False)
+            log_embed.add_field(name="Ursprünglicher Betrag", value=f"{invoice_data['original_betrag']:,.2f} €", inline=True)
+            log_embed.add_field(name="Neuer Betrag", value=f"**{invoice_data['betrag']:,.2f} €**", inline=True)
+            if surcharge_percent > 0:
+                log_embed.add_field(name="Mahngebühr", value=f"+{surcharge_percent}%", inline=True)
+            else:
+                log_embed.add_field(name="Mahngebühr", value="Keine", inline=True)
+            log_embed.add_field(name="━━━━━━━━━━━━━━━━━━━━━━━", value="**Zusatzinformationen**", inline=False)
+            log_embed.add_field(name="Kunden-ID", value=f"`{invoice_data['customer_id']}`", inline=True)
+            log_embed.add_field(name="Zeitstempel", value=datetime.now().strftime('%d.%m.%Y, %H:%M:%S Uhr'), inline=True)
+            log_embed.set_footer(text="Automatisch generiert • System-ID: 0")
+            await send_to_log_channel(guild, log_embed)
+
+            add_log_entry(
+                f"MAHNUNG_{reminder_number}",
+                0,
+                {
+                    "invoice_id": invoice_id,
+                    "customer_id": invoice_data['customer_id'],
+                    "surcharge": surcharge_percent
+                }
+            )
+
+            break
+
+    except Exception as e:
+        logger.error(f"Fehler beim Senden der Mahnung: {e}", exc_info=True)
+
+# Ticket-System
+class TicketView(discord.ui.View):
+    def __init__(self):
+        super().__init__(timeout=None)
+
+    @discord.ui.button(label="Kundenkontakt anfragen", style=discord.ButtonStyle.primary, custom_id="open_ticket", emoji="📞")
+    async def open_ticket(self, interaction: discord.Interaction, button: discord.ui.Button):
+        logger.info(f"Ticket-Button geklickt von User {interaction.user.id}")
+        await interaction.response.send_modal(TicketModal())
+
+class TicketModal(discord.ui.Modal, title="Kundenkontakt-Anfrage"):
+    customer_id_input = discord.ui.TextInput(
+        label="Versicherungsnehmer-ID",
+        placeholder="VN-24123456",
+        required=True,
+        max_length=20
+    )
+
+    reason = discord.ui.TextInput(
+        label="Grund der Kontaktaufnahme",
+        style=discord.TextStyle.paragraph,
+        placeholder="Bitte beschreiben Sie detailliert den Anlass für die Kontaktaufnahme...",
+        required=True,
+        max_length=1000
+    )
+
+    async def on_submit(self, interaction: discord.Interaction):
+        await interaction.response.defer(ephemeral=True)
+        logger.info(f"Ticket wird erstellt von User {interaction.user.id}")
+
+        try:
+            customer_id = self.customer_id_input.value
+
+            if customer_id not in data['customers']:
+                error_embed = discord.Embed(
+                    title="Kunde nicht gefunden",
+                    description=f"Es existiert keine Akte mit der Versicherungsnehmer-ID `{customer_id}`.",
+                    color=COLOR_ERROR
+                )
+                await interaction.followup.send(embed=error_embed, ephemeral=True)
+                return
+
+            customer = data['customers'][customer_id]
+            guild = interaction.guild
+            category = discord.utils.get(guild.categories, name="Support-Tickets")
+
+            if not category:
+                category = await guild.create_category("Support-Tickets")
+
+            ticket_channel = await category.create_text_channel(
+                name=f"ticket-{customer_id.lower()}",
+                topic=f"Kundenkontakt: {customer['rp_name']} | {customer_id}"
+            )
+
+            customer_user = guild.get_member(customer['discord_user_id'])
+
+            # Verbessertes Ticket-Embed
+            embed = discord.Embed(
+                title="🎫 Support-Ticket",
+                description="**Ein neues Kundenkontakt-Ticket wurde eröffnet**\n\nWillkommen! Dieses Ticket wurde erstellt, um eine professionelle Kommunikation zwischen Mitarbeiter und Versicherungsnehmer zu ermöglichen.",
+                color=COLOR_INFO,
+                timestamp=datetime.now()
+            )
+
+            embed.add_field(name="━━━━━━━━━━━━━━━━━━━━━━━", value="**Ticket-Informationen**", inline=False)
+            embed.add_field(name="📊 Status", value="🟢 Offen", inline=True)
+            embed.add_field(name="⏰ Erstellt am", value=datetime.now().strftime('%d.%m.%Y, %H:%M'), inline=True)
+            embed.add_field(name="🔢 Priorität", value="Normal", inline=True)
+
+            embed.add_field(name="━━━━━━━━━━━━━━━━━━━━━━━", value="**Beteiligte Personen**", inline=False)
+            embed.add_field(name="👤 Mitarbeiter", value=f"{interaction.user.mention}\n`{interaction.user.id}`", inline=True)
+            embed.add_field(name="👥 Versicherungsnehmer", value=f"{customer['rp_name']}\n`{customer_id}`", inline=True)
+            embed.add_field(name="‎", value="‎", inline=True)
+
+            embed.add_field(name="━━━━━━━━━━━━━━━━━━━━━━━", value="**Anlass der Kontaktaufnahme**", inline=False)
+            embed.add_field(name="📝 Beschreibung", value=self.reason.value, inline=False)
+
+            embed.add_field(name="━━━━━━━━━━━━━━━━━━━━━━━", value="**Kundeninformationen**", inline=False)
+            insurance_info = "\n".join(f"▸ {ins}" for ins in customer['versicherungen'])
+            embed.add_field(name="🛡️ Versicherungen", value=insurance_info, inline=False)
+            embed.add_field(name="💰 Monatsbeitrag", value=f"`{customer['total_monthly_price']:,.2f} €`", inline=True)
+            embed.add_field(name="💳 HBpay", value=f"`{customer['hbpay_nummer']}`", inline=True)
+            embed.add_field(name="🆔 Economy-ID", value=f"`{customer['economy_id']}`", inline=True)
+
+            embed.set_footer(text="Support-System • Nutzen Sie den Button unten, um dieses Ticket zu schließen")
+
+            # Close-Button hinzufügen
+            close_view = TicketCloseView(ticket_channel.id, customer_id)
+
+            mentions = [interaction.user.mention]
+            if customer_user:
+                mentions.append(customer_user.mention)
+
+            await ticket_channel.send(" ".join(mentions), embed=embed, view=close_view)
+
+            add_log_entry(
+                "TICKET_ERSTELLT",
+                interaction.user.id,
+                {
+                    "customer_id": customer_id,
+                    "channel_id": ticket_channel.id,
+                    "reason": self.reason.value
+                }
+            )
+
+            log_embed = discord.Embed(
+                title="🎫 Neues Support-Ticket",
+                color=COLOR_INFO,
+                timestamp=datetime.now()
+            )
+            log_embed.add_field(name="Ticket-Channel", value=ticket_channel.mention, inline=True)
+            log_embed.add_field(name="Kunde", value=customer['rp_name'], inline=True)
+            log_embed.add_field(name="Erstellt von", value=interaction.user.mention, inline=True)
+            await send_to_log_channel(interaction.guild, log_embed)
+
+            success_embed = discord.Embed(
+                title="Ticket erfolgreich erstellt",
+                description="Die Kundenkontakt-Anfrage wurde erstellt.",
+                color=COLOR_SUCCESS
+            )
+            success_embed.add_field(name="Ticket-Channel", value=ticket_channel.mention, inline=True)
+
+            await interaction.followup.send(embed=success_embed, ephemeral=True)
+
+        except Exception as e:
+            logger.error(f"Fehler beim Erstellen des Tickets: {e}", exc_info=True)
+            error_embed = discord.Embed(
+                title="Fehler bei der Ticket-Erstellung",
+                description=f"Es ist ein Fehler aufgetreten: {str(e)}",
+                color=COLOR_ERROR
+            )
+            await interaction.followup.send(embed=error_embed, ephemeral=True)
+
+class TicketCloseView(discord.ui.View):
+    def __init__(self, channel_id, customer_id):
+        super().__init__(timeout=None)
+        self.channel_id = channel_id
+        self.customer_id = customer_id
+
+    @discord.ui.button(label="Ticket schließen", style=discord.ButtonStyle.danger, custom_id="close_ticket", emoji="🔒")
+    async def close_ticket(self, interaction: discord.Interaction, button: discord.ui.Button):
+        # Nur Mitarbeiter können Tickets schließen
+        finance_role = discord.utils.get(interaction.guild.roles, name="「 Leitungsebene 」")
+        if finance_role not in interaction.user.roles:
+            error_embed = discord.Embed(
+                title="Zugriff verweigert",
+                description="Nur Mitarbeiter können Tickets schließen.",
+                color=COLOR_ERROR
+            )
+            await interaction.response.send_message(embed=error_embed, ephemeral=True)
+            return
+
+        channel = interaction.channel
+
+        close_embed = discord.Embed(
+            title="🔒 Ticket wird geschlossen",
+            description=f"Dieses Ticket wird in 5 Sekunden geschlossen und archiviert.\n\nGeschlossen von: {interaction.user.mention}",
+            color=COLOR_WARNING,
+            timestamp=datetime.now()
+        )
+
+        await interaction.response.send_message(embed=close_embed)
+
+        # Log
+        log_embed = discord.Embed(
+            title="🔒 Support-Ticket geschlossen",
+            description="Ein Mitarbeiter hat ein Kundenkontakt-Ticket geschlossen.",
+            color=COLOR_WARNING,
+            timestamp=datetime.now()
+        )
+        log_embed.add_field(name="━━━━━━━━━━━━━━━━━━━━━━━", value="**Ticket-Informationen**", inline=False)
+        log_embed.add_field(name="Ticket-Channel", value=channel.mention, inline=True)
+        log_embed.add_field(name="Geschlossen von", value=interaction.user.mention, inline=True)
+        log_embed.add_field(name="Status", value="🔴 Geschlossen", inline=True)
+        log_embed.add_field(name="━━━━━━━━━━━━━━━━━━━━━━━", value="**Zusatzinformationen**", inline=False)
+        log_embed.add_field(name="Kunden-ID", value=f"`{self.customer_id}`", inline=True)
+        log_embed.add_field(name="Channel-ID", value=f"`{self.channel_id}`", inline=True)
+        log_embed.add_field(name="Zeitstempel", value=datetime.now().strftime('%d.%m.%Y, %H:%M:%S Uhr'), inline=True)
+        log_embed.set_footer(text=f"User-ID: {interaction.user.id}")
+        await send_to_log_channel(interaction.guild, log_embed)
+
+        add_log_entry(
+            "TICKET_GESCHLOSSEN",
+            interaction.user.id,
+            {
+                "customer_id": self.customer_id,
+                "channel_id": self.channel_id
+            }
+        )
+
+        import asyncio
+        await asyncio.sleep(5)
+        await channel.delete(reason=f"Ticket geschlossen von {interaction.user}")
+
+@bot.tree.command(name="ticket_setup", description="Richtet das Ticket-System ein")
+@app_commands.describe(channel="Channel für das Ticket-Panel")
+async def setup_tickets(interaction: discord.Interaction, channel: discord.TextChannel):
+    logger.info(f"Ticket-System wird eingerichtet von User {interaction.user.id} in Channel {channel.id}")
+
+    try:
+        embed = discord.Embed(
+            title="",
+            description="",
+            color=COLOR_PRIMARY
+        )
+
+        embed.add_field(
+            name="🎫 Professionelles Kundenkontakt-System",
+            value="━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━",
+            inline=False
+        )
+
+        embed.add_field(
+            name="",
+            value=(
+                "Willkommen beim zentralen Kundenkontakt-Portal unserer Versicherungsgesellschaft. "
+                "Dieses System ermöglicht eine strukturierte und professionelle Kommunikation zwischen "
+                "unseren Mitarbeitern und Versicherungsnehmern.\n\u200b"
+            ),
+            inline=False
+        )
+
+        embed.add_field(
+            name="📋 So funktioniert's",
+            value=(
+                "```\n"
+                "1. Klicken Sie auf den Button unten\n"
+                "2. Geben Sie die Versicherungsnehmer-ID ein\n"
+                "3. Beschreiben Sie den Kontaktgrund detailliert\n"
+                "4. Ein privater Ticket-Channel wird erstellt\n"
+                "```"
+            ),
+            inline=False
+        )
+
+        embed.add_field(
+            name="⚠️ Wichtige Hinweise",
+            value=(
+                "▸ Stellen Sie sicher, dass die **Versicherungsnehmer-ID korrekt** ist\n"
+                "▸ Formulieren Sie den Kontaktgrund **präzise und ausführlich**\n"
+                "▸ Der Versicherungsnehmer wird **automatisch zum Ticket hinzugefügt**\n"
+                "▸ Alle Kundeninformationen werden **direkt im Ticket angezeigt**\n\u200b"
+            ),
+            inline=False
+        )
+
+        embed.add_field(
+            name="",
+            value="━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━",
+            inline=False
+        )
+
+        embed.set_footer(
+            text="Versicherungs-Management-System v2.0 • Datenschutzkonform & DSGVO-konform",
+            icon_url=interaction.guild.icon.url if interaction.guild.icon else None
+        )
+
+        embed.timestamp = datetime.now()
+
+        view = TicketView()
+        await channel.send(embed=embed, view=view)
+
+        success_embed = discord.Embed(
+            title="Ticket-System aktiviert",
+            description=f"Das Kundenkontakt-System wurde erfolgreich in {channel.mention} eingerichtet.",
+            color=COLOR_SUCCESS
+        )
+        await interaction.response.send_message(embed=success_embed, ephemeral=True)
+
+        add_log_entry(
+            "TICKET_SYSTEM_SETUP",
+            interaction.user.id,
+            {"channel_id": channel.id}
+        )
+
+        log_embed = discord.Embed(
+            title="⚙️ Ticket-System eingerichtet",
+            description="Das Kundenkontakt-System wurde erfolgreich konfiguriert.",
+            color=COLOR_INFO,
+            timestamp=datetime.now()
+        )
+        log_embed.add_field(name="━━━━━━━━━━━━━━━━━━━━━━━", value="**Setup-Informationen**", inline=False)
+        log_embed.add_field(name="Ticket-Panel Channel", value=channel.mention, inline=True)
+        log_embed.add_field(name="Eingerichtet von", value=interaction.user.mention, inline=True)
+        log_embed.add_field(name="Status", value="✅ Aktiv", inline=True)
+        log_embed.add_field(name="━━━━━━━━━━━━━━━━━━━━━━━", value="**Zusatzinformationen**", inline=False)
+        log_embed.add_field(name="Channel-ID", value=f"`{channel.id}`", inline=True)
+        log_embed.add_field(name="Zeitstempel", value=datetime.now().strftime('%d.%m.%Y, %H:%M:%S Uhr'), inline=True)
+        log_embed.set_footer(text=f"User-ID: {interaction.user.id}")
+        await send_to_log_channel(interaction.guild, log_embed)
+
+    except Exception as e:
+        logger.error(f"Fehler beim Einrichten des Ticket-Systems: {e}", exc_info=True)
+        error_embed = discord.Embed(
+            title="Fehler beim Setup",
+            description=f"Es ist ein Fehler aufgetreten: {str(e)}",
+            color=COLOR_ERROR
+        )
+        await interaction.response.send_message(embed=error_embed, ephemeral=True)
+
+# Log anzeigen
+@bot.tree.command(name="logs_anzeigen", description="Zeigt die letzten Bot-Aktivitäten an")
+@app_commands.describe(anzahl="Anzahl der anzuzeigenden Log-Einträge (Standard: 10)")
+async def show_logs(interaction: discord.Interaction, anzahl: int = 10):
+    logger.info(f"Logs werden abgerufen von User {interaction.user.id}")
+
+    if not interaction.user.guild_permissions.administrator:
+        error_embed = discord.Embed(
+            title="Zugriff verweigert",
+            description="Nur Administratoren können die System-Logs einsehen.",
+            color=COLOR_ERROR
+        )
+        await interaction.response.send_message(embed=error_embed, ephemeral=True)
+        return
+
+    await interaction.response.defer(ephemeral=True)
+
+    try:
+        if not data['logs']:
+            info_embed = discord.Embed(
+                title="Keine Logs vorhanden",
+                description="Es sind noch keine Aktivitäten protokolliert worden.",
+                color=COLOR_INFO
+            )
+            await interaction.followup.send(embed=info_embed, ephemeral=True)
+            return
+
+        recent_logs = data['logs'][-anzahl:]
+        recent_logs.reverse()
+
+        embed = discord.Embed(
+            title="📊 System-Aktivitätsprotokoll",
+            description=f"```ansi\n\u001b[1;37mAktuelle Systemübersicht - {len(recent_logs)} Einträge\u001b[0m\n```",
+            color=COLOR_PRIMARY,
+            timestamp=datetime.now()
+        )
+
+        # Emoji-Mapping für verschiedene Aktionen
+        action_emojis = {
+            "KUNDENAKTE_ERSTELLT": "📋",
+            "RECHNUNG_ERSTELLT": "🧾",
+            "RECHNUNG_BEZAHLT": "💰",
+            "RECHNUNG_ARCHIVIERT": "📦",
+            "MAHNUNG_1": "⚠️",
+            "MAHNUNG_2": "🔶",
+            "MAHNUNG_3": "🔴",
+            "TICKET_ERSTELLT": "🎫",
+            "TICKET_GESCHLOSSEN": "🔒",
+            "TICKET_SYSTEM_SETUP": "⚙️"
+        }
+
+        action_names = {
+            "KUNDENAKTE_ERSTELLT": "Kundenakte erstellt",
+            "RECHNUNG_ERSTELLT": "Rechnung ausgestellt",
+            "RECHNUNG_BEZAHLT": "Rechnung bezahlt",
+            "RECHNUNG_ARCHIVIERT": "Rechnung archiviert",
+            "MAHNUNG_1": "1. Mahnung versendet",
+            "MAHNUNG_2": "2. Mahnung versendet (+5%)",
+            "MAHNUNG_3": "3. Mahnung versendet (+10%)",
+            "TICKET_ERSTELLT": "Ticket erstellt",
+            "TICKET_GESCHLOSSEN": "Ticket geschlossen",
+            "TICKET_SYSTEM_SETUP": "Ticket-System eingerichtet"
+        }
+
+        for idx, log in enumerate(recent_logs, 1):
+            timestamp = datetime.fromisoformat(log['timestamp']).strftime('%d.%m.%Y • %H:%M:%S')
+            user = interaction.guild.get_member(log['user_id']) if log['user_id'] != 0 else None
+            user_name = user.mention if user else "🤖 **System**"
+
+            action = log['action']
+            emoji = action_emojis.get(action, "📌")
+            action_display = action_names.get(action, action)
+
+            # Details formatieren
+            details_list = []
+            for k, v in log['details'].items():
+                if k == 'reason':
+                    continue
+                if k == 'customer_id':
+                    details_list.append(f"`{v}`")
+                elif k == 'invoice_id':
+                    details_list.append(f"`{v}`")
+                elif k == 'betrag' or 'price' in k:
+                    details_list.append(f"**{v:,.2f} €**")
+                else:
+                    details_list.append(f"{v}")
+
+            details_text = " • ".join(details_list) if details_list else "—"
+
+            embed.add_field(
+                name=f"{emoji} {action_display}",
+                value=(
+                    f"```fix\n"
+                    f"Zeitstempel: {timestamp}\n"
+                    f"```"
+                    f"**Bearbeiter:** {user_name}\n"
+                    f"**Details:** {details_text}\n"
+                    f"━━━━━━━━━━━━━━━━━━━━━━━"
+                ),
+                inline=False
+            )
+
+        embed.set_footer(
+            text=f"Angefordert von {interaction.user.display_name} • System v2.0",
+            icon_url=interaction.user.display_avatar.url if interaction.user.display_avatar else None
+        )
+
+        await interaction.followup.send(embed=embed, ephemeral=True)
+
+    except Exception as e:
+        logger.error(f"Fehler beim Anzeigen der Logs: {e}", exc_info=True)
+        error_embed = discord.Embed(
+            title="Fehler beim Laden der Logs",
+            description=f"Es ist ein Fehler aufgetreten: {str(e)}",
+            color=COLOR_ERROR
+        )
+        await interaction.followup.send(embed=error_embed, ephemeral=True)
+
+# Für Render: Keep-Alive mit Flask
+from flask import Flask
+from threading import Thread
+
+app = Flask('')
+
+@app.route('/')
+def home():
+    return "Insurance Bot läuft erfolgreich!"
+
+@app.route('/health')
+def health():
+    return {"status": "healthy", "bot": bot.user.name if bot.user else "starting"}
+
+def run():
+    port = int(os.environ.get('PORT', 8080))
+    app.run(host='0.0.0.0', port=port)
+
+def keep_alive():
+    t = Thread(target=run)
+    t.start()
+
+# Bot starten
+if __name__ == "__main__":
+    keep_alive()  # Webserver für Render
+
+    # Token aus Umgebungsvariable
+    token = os.getenv('DISCORD_TOKEN')
+    if not token:
+        logger.error("DISCORD_TOKEN nicht gefunden! Bitte in Render-Umgebungsvariablen setzen.")
+    else:
+        logger.info("Bot wird gestartet...")
+        bot.run(token)
